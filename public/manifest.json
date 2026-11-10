@@ -1,0 +1,16 @@
+{
+  "name": "PresenceTrack Ambient",
+  "short_name": "PresenceTrack",
+  "description": "DPDP Act 2023 compliant presence analytics platform",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAF9FC",
+  "theme_color": "#1F1F1F",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
