@@ -439,41 +439,8 @@ Evaluated using a controlled synthetic evaluation suite (`vision-gateway/tests/t
 - **Python Test Suite**: **30 / 30 tests passed** (`./vision-gateway/.venv/bin/pytest vision-gateway/tests/ -v`).
 - **Vitest Full-Stack Suite**: **77 / 77 tests passed** across 10 test suites (`npm test`).
 - **ESLint Code Quality**: **0 errors**, clean linting (`npm run lint`).
-- **Production Build**: **0 errors**, built cleanly in 250ms (`npm run build`).
+- **Production Build**: **0 errors**, built cleanly in 254ms (`npm run build`).
 - **ESP32-CAM Firmware**: Strictly preserved at original 328 lines (`firmware/esp32-cam-node/esp32-cam-node.ino`).
 
 ### 7. Phase 6 Readiness Assessment
 Phase 5.1.2 completes the hardening, cryptographic validation, and security verification of the Edge Vision Gateway and backend APIs. The system is structurally sound and mathematically validated on synthetic fixtures. Physical deployment (Phase 6: hardware assembly, optical calibration, on-site threshold tuning) can proceed once physical ESP32-CAM hardware and test facilities are provisioned.
-
-### 4. Telemetry and Endpoint Security Hardening
-- **POST `/api/public/esp32/telemetry`**:
-  - Enforces `x-device-key` header authentication matching `ESP32_DEVICE_KEY`.
-  - Frame coordinate validation: strictly bounds coordinates within maximum dimensions ($0 \le x \le 4000, 0 \le y \le 4000, x+w \le 4000, y+h \le 4000$). Out-of-bounds bounding boxes are rejected with HTTP 400.
-  - Replay Protection: validates payload ISO timestamp; rejects requests skewed by $> 60$ seconds.
-  - Nonce Deduplication: tracks recently seen `event_nonce` values to suppress replayed packets.
-  - Sensitive Data Stripping: biometric embeddings and vector hashes are never accepted or stored in telemetry.
-- **GET `/api/public/esp32/telemetry`**:
-  - Enforces authorization: requires a valid `x-device-key` or an authenticated session cookie/token; returns HTTP 401 Unauthorized for unauthenticated requests.
-  - Returns sanitized real-time telemetry coordinates to authorized security consoles.
-
-### 5. Continuous Pipeline & Disconnection Verification
-- Continuous Multi-Frame Session: Validated that a subject crossing the virtual tripwire over 7 consecutive frames produces exactly **one atomic transit event** due to directional trajectory vector evaluation and frame-level debouncing (`debounce_frames=20`).
-- Disconnection / Reconnection: Stream reader handles unexpected camera feed loss with automatic exponential backoff reconnection.
-- Backend Resiliency: Event dispatcher retries transient 5xx network errors up to 3 times before entering graceful error backoff.
-
-### 6. Known System Limitations
-- **Sensor Resolution**: The OV2640 sensor on the ESP32-CAM operates at VGA (640x480) or QVGA (320x240). Subjects must be within 1.5–2.5 meters of the camera so that the face area is at least 40x40 pixels for accurate landmark alignment.
-- **Illumination**: Environments below 100 lux (dim corridor lighting) reduce contrast and increase detection latency.
-- **Profile Angles**: SFace is optimized for frontal and near-frontal poses ($\le 25^\circ$ yaw). Extreme profile views require supplementary angled cameras.
-
-### 7. Status of Automatic Biometric Attendance
-- **`AUTO_BIOMETRIC_ATTENDANCE_ENABLED=False`** (Safety Default):
-  - In compliance with safety recommendations, automatic biometric attendance punching is **intentionally disabled** by default.
-  - When a face is recognized above the 0.363 threshold, the system marks the status as `DISABLED_FOR_REVIEW` and logs telemetry for security review rather than auto-marking official attendance records.
-  - Employees whose consent is revoked (`consent_revoked = true`) or who decline biometric enrollment utilize the non-biometric manual fallback (`/enclave/employee` manual punch card) with full compliance under Section 12 of the DPDP Act 2023.
-
-### 8. Test Execution Summary
-- **Python Test Suite**: **27 / 27 tests passed** (`pytest vision-gateway/tests/ -v`).
-- **Vitest Full-Stack Suite**: **72 / 72 tests passed** across 10 suites (`npm test`).
-- **ESLint Code Quality**: **0 errors** (`npm run lint`).
-- **Production Build**: **0 errors**, built cleanly in 275ms (`npm run build`).
