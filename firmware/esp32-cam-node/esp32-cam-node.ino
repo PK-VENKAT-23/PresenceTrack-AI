@@ -1,5 +1,5 @@
 /**
- * PresenceTrack Ambient — ESP32-CAM Edge Optical Boundary Node
+ * PresenceTrack AI — ESP32-CAM Edge Optical Boundary Node
  * Standard: DPDP Act 2023 Compliant Biometric Presence Architecture
  * 
  * Hardware: AI-Thinker ESP32-CAM (OV2640 Sensor + 4MB PSRAM)
@@ -26,17 +26,22 @@
 // ==========================================
 // 1. NETWORK & BACKEND CONFIGURATION
 // ==========================================
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+#if __has_include("config.h")
+  #include "config.h"
+#elif __has_include("config.example.h")
+  #include "config.example.h"
+#else
+  #error "No configuration header found. Please copy config.example.h to config.h"
+#endif
 
-// PresenceTrack backend (your published app URL, no trailing slash)
-const char* BACKEND_HOST  = "https://YOUR-APP.lovable.app";
-// Must equal the ESP32_DEVICE_KEY secret configured for the app
-const char* DEVICE_KEY    = "YOUR_ESP32_DEVICE_KEY";
-const char* NODE_ID       = "ESP32-CAM-01-NORTH";
-const char* BOUNDARY_NAME = "Corridor -> Workspace Floor";
-const char* ZONE_A        = "CORRIDOR_TRANSIT";
-const char* ZONE_B        = "WORKSPACE_FLOOR";
+// Fallback defaults for optional operational parameters
+#ifndef HTTP_TIMEOUT_MS
+  #define HTTP_TIMEOUT_MS 5000
+#endif
+
+#ifndef HEARTBEAT_INTERVAL_MS
+  #define HEARTBEAT_INTERVAL_MS 15000
+#endif
 
 // ==========================================
 // 2. AI-THINKER ESP32-CAM PIN DEFINITIONS
@@ -69,7 +74,8 @@ static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %
 
 httpd_handle_t stream_httpd = NULL;
 unsigned long lastHeartbeat = 0;
-const unsigned long HEARTBEAT_INTERVAL_MS = 15000;
+unsigned long lastWifiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL_MS = 10000;
 
 // ==========================================
 // 3. MJPEG STREAM HANDLER (PORT 81 /stream)
@@ -156,15 +162,20 @@ void registerNodeWithBackend() {
   WiFiClientSecure client;
   client.setInsecure(); // TODO: pin the server certificate for production
   HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
 
   String registerUrl = String(BACKEND_HOST) + "/api/public/esp32/register-node";
   String myStreamUrl = "http://" + WiFi.localIP().toString() + ":81/stream";
 
-  http.begin(client, registerUrl);
+  if (!http.begin(client, registerUrl)) {
+    Serial.println(F("[ESP32-CAM] Failed to initialize HTTP client for registration"));
+    return;
+  }
+
   http.addHeader("Content-Type", "application/json");
   http.addHeader("x-device-key", DEVICE_KEY);
 
-  // Build JSON Registration Payload
+  // Build JSON Registration Payload (Strictly preserves backend schema)
   String payload = "{";
   payload += "\"id\":\"" + String(NODE_ID) + "\",";
   payload += "\"stream_url\":\"" + myStreamUrl + "\",";
@@ -196,9 +207,14 @@ void sendBoundaryTransitEvent(const char* userId, const char* direction, float c
   WiFiClientSecure client;
   client.setInsecure(); // TODO: pin the server certificate for production
   HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
 
   String transitUrl = String(BACKEND_HOST) + "/api/public/esp32/boundary-transit";
-  http.begin(client, transitUrl);
+  if (!http.begin(client, transitUrl)) {
+    Serial.println(F("[ESP32-CAM] Failed to initialize HTTP client for transit event"));
+    return;
+  }
+
   http.addHeader("Content-Type", "application/json");
   http.addHeader("x-device-key", DEVICE_KEY);
 
@@ -232,7 +248,13 @@ void setup() {
 
   Serial.begin(115200);
   Serial.setDebugOutput(false);
-  Serial.println("\n--- [PresenceTrack Ambient] ESP32-CAM Optical Sensor Node ---");
+  Serial.println("\n--- [PresenceTrack AI] ESP32-CAM Optical Sensor Node ---");
+
+  // Warn if using unconfigured placeholder credentials
+  if (strcmp(WIFI_SSID, "YOUR_WIFI_SSID") == 0 || strcmp(DEVICE_KEY, "YOUR_ESP32_DEVICE_KEY") == 0) {
+    Serial.println(F("\n[WARNING] Default placeholder credentials detected!"));
+    Serial.println(F("[WARNING] Please update firmware/esp32-cam-node/config.h with your actual Wi-Fi SSID and ESP32_DEVICE_KEY secret.\n"));
+  }
 
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, LOW); // Flash LED off
@@ -315,7 +337,16 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // Send periodic heartbeat to keep node status "online"
+  // 1. Non-blocking Wi-Fi watchdog
+  if (now - lastWifiCheck >= WIFI_CHECK_INTERVAL_MS) {
+    lastWifiCheck = now;
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println(F("[ESP32-CAM] Wi-Fi link lost. Attempting non-blocking background reconnect..."));
+      WiFi.reconnect();
+    }
+  }
+
+  // 2. Send periodic heartbeat to keep node status "online"
   if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
     lastHeartbeat = now;
     if (WiFi.status() == WL_CONNECTED) {
