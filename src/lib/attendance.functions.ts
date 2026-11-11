@@ -119,15 +119,10 @@ export const getTodayAttendance = createServerFn({ method: "POST" })
     }
 
     // Staff overview: fetch active people and today's attendance
-    let query = context.supabase
+    const query = context.supabase
       .from("enterprise_users")
-      .select("id, name, badge_id, department, department_id, current_zone, is_in_workspace")
-      .eq("is_active", true)
+      .select("id, name, badge_id, department, current_zone, is_in_workspace")
       .order("name", { ascending: true });
-
-    if (data.department_id) {
-      query = query.eq("department_id", data.department_id);
-    }
 
     const [{ data: people, error: pErr }, { data: records, error: rErr }, { data: dwellList }] =
       await Promise.all([

@@ -99,16 +99,11 @@ export const createEmployee = createServerFn({ method: "POST" })
         email: data.email.toLowerCase(),
         badge_id: data.badge_id.toUpperCase(),
         department: deptName,
-        department_id: data.department_id ?? null,
         role_title: data.role_title,
-        employment_type: data.employment_type,
-        shift_start: data.shift_start,
-        shift_end: data.shift_end,
         avatar_url: avatarUrl,
         imported_role: data.initial_role,
-        is_active: true,
       })
-      .select("id, name, email, badge_id, department, role_title, is_active, created_at")
+      .select("id, name, email, badge_id, department, role_title, created_at")
       .single();
 
     if (error || !created) {
@@ -187,7 +182,7 @@ export const updateEmployee = createServerFn({ method: "POST" })
       .from("enterprise_users")
       .update(updates)
       .eq("id", data.id)
-      .select("id, name, email, badge_id, department, role_title, is_active")
+      .select("id, name, email, badge_id, department, role_title")
       .single();
 
     if (error || !updated) {
@@ -242,13 +237,21 @@ export const getEmployee = createServerFn({ method: "POST" })
     const { data: emp, error } = await context.supabase
       .from("enterprise_users")
       .select(
-        "id, auth_user_id, email, name, badge_id, department, department_id, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, is_active, employment_type, shift_start, shift_end, created_at",
+        "id, auth_user_id, email, name, badge_id, department, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, created_at",
       )
       .eq("id", data.id)
       .maybeSingle();
 
     if (error || !emp) throw new Error("Employee not found");
-    return { success: true, employee: emp };
+    const fullEmp = {
+      ...emp,
+      is_active: (emp as { is_active?: boolean }).is_active ?? true,
+      department_id: (emp as { department_id?: string | null }).department_id ?? null,
+      employment_type: (emp as { employment_type?: string }).employment_type ?? "FULL_TIME",
+      shift_start: (emp as { shift_start?: string }).shift_start ?? "09:00:00",
+      shift_end: (emp as { shift_end?: string }).shift_end ?? "18:00:00",
+    };
+    return { success: true, employee: fullEmp };
   });
 
 /** List employees with optional filters (strips biometric embeddings). */
@@ -264,24 +267,32 @@ export const listEmployees = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
-    let query = context.supabase
+    const query = context.supabase
       .from("enterprise_users")
       .select(
-        "id, auth_user_id, email, name, badge_id, department, department_id, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, is_active, employment_type, shift_start, shift_end, created_at",
+        "id, auth_user_id, email, name, badge_id, department, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, created_at",
       )
       .order("name", { ascending: true });
-
-    if (!data.include_inactive) {
-      query = query.eq("is_active", true);
-    }
-    if (data.department_id) {
-      query = query.eq("department_id", data.department_id);
-    }
 
     const { data: employees, error } = await query;
     if (error) throw new Error("Failed to list employees");
 
-    let filtered = employees ?? [];
+    const mapped = (employees ?? []).map((emp) => ({
+      ...emp,
+      is_active: (emp as { is_active?: boolean }).is_active ?? true,
+      department_id: (emp as { department_id?: string | null }).department_id ?? null,
+      employment_type: (emp as { employment_type?: string }).employment_type ?? "FULL_TIME",
+      shift_start: (emp as { shift_start?: string }).shift_start ?? "09:00:00",
+      shift_end: (emp as { shift_end?: string }).shift_end ?? "18:00:00",
+    }));
+
+    let filtered = mapped;
+    if (!data.include_inactive) {
+      filtered = filtered.filter((e) => e.is_active);
+    }
+    if (data.department_id) {
+      filtered = filtered.filter((e) => e.department_id === data.department_id);
+    }
     if (data.search) {
       const q = data.search.toLowerCase();
       filtered = filtered.filter(
@@ -336,22 +347,22 @@ export const listDepartments = createServerFn({ method: "POST" })
   .handler(async ({ context }) => {
     const [{ data: depts, error: dError }, { data: people, error: pError }] = await Promise.all([
       context.supabase.from("departments").select("*").order("name", { ascending: true }),
-      context.supabase.from("enterprise_users").select("id, department, department_id, is_active"),
+      context.supabase.from("enterprise_users").select("id, department"),
     ]);
 
     if (dError) throw new Error("Failed to load departments");
 
     const counts = new Map<string, number>();
     for (const p of people ?? []) {
-      if (!p.is_active) continue;
-      if (p.department_id) {
-        counts.set(p.department_id, (counts.get(p.department_id) ?? 0) + 1);
+      const deptKey = (p as { department_id?: string }).department_id ?? p.department;
+      if (deptKey) {
+        counts.set(deptKey, (counts.get(deptKey) ?? 0) + 1);
       }
     }
 
     const items = (depts ?? []).map((d) => ({
       ...d,
-      active_employees: counts.get(d.id) ?? 0,
+      active_employees: counts.get(d.id) ?? counts.get(d.name) ?? 0,
     }));
 
     return { success: true, departments: items };

@@ -181,11 +181,18 @@ export const personnelQuery = () =>
       const { data, error } = await supabase
         .from("enterprise_users")
         .select(
-          "id, auth_user_id, email, name, badge_id, department, department_id, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, is_active, employment_type, shift_start, shift_end, created_at",
+          "id, auth_user_id, email, name, badge_id, department, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, created_at",
         )
         .order("name");
       if (error) throw error;
-      return (data ?? []) as EnterpriseUser[];
+      return (data ?? []).map((u) => ({
+        ...u,
+        is_active: (u as { is_active?: boolean }).is_active ?? true,
+        department_id: (u as { department_id?: string | null }).department_id ?? null,
+        employment_type: (u as { employment_type?: string }).employment_type ?? "FULL_TIME",
+        shift_start: (u as { shift_start?: string }).shift_start ?? "09:00:00",
+        shift_end: (u as { shift_end?: string }).shift_end ?? "18:00:00",
+      })) as EnterpriseUser[];
     },
   });
 

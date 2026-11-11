@@ -176,11 +176,9 @@ export const inviteEmployee = createServerFn({ method: "POST" })
         email: emailNormalized,
         badge_id: badgeNormalized,
         department: departmentName,
-        department_id: data.department_id ?? null,
         role_title: data.role_title?.trim() || "Staff",
         imported_role: data.role,
         avatar_url: avatarUrl,
-        is_active: true,
       })
       .select()
       .single();
@@ -350,7 +348,7 @@ export const getSessionAuthDetails = createServerFn({ method: "POST" })
       context.supabase
         .from("enterprise_users")
         .select(
-          "id, auth_user_id, email, name, badge_id, department, department_id, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, is_active, created_at",
+          "id, auth_user_id, email, name, badge_id, department, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, created_at",
         )
         .eq("auth_user_id", context.userId)
         .maybeSingle(),
