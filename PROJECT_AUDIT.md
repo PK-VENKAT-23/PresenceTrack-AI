@@ -444,3 +444,36 @@ Evaluated using a controlled synthetic evaluation suite (`vision-gateway/tests/t
 
 ### 7. Phase 6 Readiness Assessment
 Phase 5.1.2 completes the hardening, cryptographic validation, and security verification of the Edge Vision Gateway and backend APIs. The system is structurally sound and mathematically validated on synthetic fixtures. Physical deployment (Phase 6: hardware assembly, optical calibration, on-site threshold tuning) can proceed once physical ESP32-CAM hardware and test facilities are provisioned.
+
+---
+
+## 12. Brand Identity Transition: PresenceTrack AI
+
+**Status**: Completed and Verified
+
+### 1. Brand Guidelines & Asset Architecture
+The platform identity has been transitioned to **`PRESENCETRACK AI`** with a stylized brand system:
+- **Typographic Lockup**: `PRESENCETRACK` in bold umbra (`#0F172A` in light / `#F8FAFC` in dark) followed by `AI` in vivid emerald green (`#10B981`).
+- **Brand Mark Icon**:
+  - A 6-blade camera aperture shutter.
+  - Centered emerald green person silhouette representing human presence with dignity and privacy.
+  - Orbital sweep ring with an emerald green satellite node representing continuous ambient detection.
+- **Adaptive Theme Assets**:
+  - `public/favicon.svg`: Dual-mode scalable vector icon adapting automatically via `@media (prefers-color-scheme: dark)`.
+  - `public/assets/logo-icon-transparent.png`: High-resolution light theme aperture mark.
+  - `public/assets/logo-dark-transparent.png`: High-resolution dark theme aperture mark with inverted blades.
+  - `public/assets/logo-primary-transparent.png`: Full horizontal brand lockup.
+  - `public/manifest.json`: Updated PWA manifest with `PresenceTrack AI` and icon configurations.
+
+### 2. Frontend & Enclave Components Updated
+- `src/components/presence/layout/BrandMark.tsx`: Dynamic responsive brand icon supporting sizes `sm` (28px), `md` (36px), `lg` (48px), and `xl` (64px), automatic light/dark switching, and optional stylized typography lockup.
+- `src/components/presence/layout/EnclaveHeader.tsx`: Unified header featuring `BrandMark` and `PRESENCETRACK AI`.
+- `src/components/presence/layout/AuthShell.tsx`: Split-screen corporate sign-in lockup with DPDP Act 2023 statutory notices.
+- `src/routes/index.tsx`: Public welcome landing page with brand lockup and feature highlights.
+- Route metadata updated across all pages (`__root.tsx`, `login.tsx`, `recovery.tsx`, `reset-password.tsx`, `unauthorized.tsx`, and the 4 role enclaves: Employee, HR, Security, Admin).
+
+### 3. Verification & Compliance
+- **Vitest Full-Stack Tests**: **77 / 77 passing**.
+- **Pytest Edge Vision Tests**: **30 / 30 passing**.
+- **ESLint**: **0 errors**, clean.
+- **Production Build**: Vite + Nitro built successfully (`.output/` generated).
