@@ -3,7 +3,7 @@ import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { merkleRoot, sha256Hex } from "@/lib/merkle";
 
-const PLATFORM = "PresenceTrack Ambient v1.0.0-PROD";
+const PLATFORM = "PresenceTrack AI v1.0.0-PROD";
 const VALIDATOR = "Orin-AGX-North";
 
 function csvCell(value: unknown): string {

@@ -8,12 +8,15 @@ import { recordAuthEvent } from "@/lib/auth.functions";
 export const Route = createFileRoute("/reset-password")({
   head: () => ({
     meta: [
-      { title: "Set Enclave Passcode — PresenceTrack Enterprise" },
-      { name: "description", content: "Establish or reset your PresenceTrack account passcode." },
-      { property: "og:title", content: "Set Enclave Passcode — PresenceTrack Enterprise" },
+      { title: "Set Enclave Passcode — PresenceTrack AI" },
+      {
+        name: "description",
+        content: "Establish or reset your PresenceTrack AI account passcode.",
+      },
+      { property: "og:title", content: "Set Enclave Passcode — PresenceTrack AI" },
       {
         property: "og:description",
-        content: "Establish or reset your PresenceTrack account passcode.",
+        content: "Establish or reset your PresenceTrack AI account passcode.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -96,12 +99,12 @@ function ResetPasswordPage() {
         </div>
 
         <h1 className="text-lg font-bold text-umbra">
-          {isInvite ? "Welcome to PresenceTrack — Create Passcode" : "Set a new passcode"}
+          {isInvite ? "Welcome to PresenceTrack AI — Create Passcode" : "Set a new passcode"}
         </h1>
         <p className="mb-6 text-xs text-sage">
           {isInvite
             ? "Establish a secure corporate passcode to activate your personnel enclave."
-            : "This replaces the credential for your PresenceTrack account."}
+            : "This replaces the credential for your PresenceTrack AI account."}
         </p>
 
         {!ready ? (

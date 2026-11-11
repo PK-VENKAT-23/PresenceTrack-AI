@@ -1,5 +1,5 @@
 /**
- * PresenceTrack Ambient — shared type contracts and constants (browser-safe).
+ * PresenceTrack AI — shared type contracts and constants (browser-safe).
  */
 import type { Database } from "@/integrations/supabase/types";
 
@@ -69,7 +69,7 @@ export const ATTENDANCE_STATUS_LABELS: Record<AttendanceStatus, string> = {
 };
 
 export const APP_CONFIG = {
-  appName: "PresenceTrack Enterprise",
+  appName: "PresenceTrack AI",
   appVersion: "v1.0.0-PROD",
   dpdpStandard: "DPDP Act 2023 Statutory Standard",
   dramTargetMs: 18,

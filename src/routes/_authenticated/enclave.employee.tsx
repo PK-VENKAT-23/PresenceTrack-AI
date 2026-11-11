@@ -23,12 +23,12 @@ import { cn } from "@/lib/utils";
 export const Route = createFileRoute("/_authenticated/enclave/employee")({
   head: () => ({
     meta: [
-      { title: "Employee Console — PresenceTrack" },
+      { title: "Employee Console — PresenceTrack AI" },
       {
         name: "description",
         content: "Your personal dwell time, boundary transits and DPDP data vault.",
       },
-      { property: "og:title", content: "Employee Console — PresenceTrack" },
+      { property: "og:title", content: "Employee Console — PresenceTrack AI" },
       {
         property: "og:description",
         content: "Your personal dwell time, boundary transits and DPDP data vault.",

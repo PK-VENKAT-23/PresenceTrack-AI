@@ -16,12 +16,12 @@ import { playTransitBlip } from "@/lib/sound-engine";
 export const Route = createFileRoute("/_authenticated/enclave/security")({
   head: () => ({
     meta: [
-      { title: "Physical Security Console — PresenceTrack" },
+      { title: "Physical Security Console — PresenceTrack AI" },
       {
         name: "description",
         content: "ESP32-CAM node matrix, boundary configuration and live optical transit stream.",
       },
-      { property: "og:title", content: "Physical Security Console — PresenceTrack" },
+      { property: "og:title", content: "Physical Security Console — PresenceTrack AI" },
       {
         property: "og:description",
         content: "ESP32-CAM node matrix, boundary configuration and live optical transit stream.",

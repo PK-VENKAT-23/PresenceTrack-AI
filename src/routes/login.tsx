@@ -44,10 +44,13 @@ export const Route = createFileRoute("/login")({
   },
   head: () => ({
     meta: [
-      { title: "Secure Access — PresenceTrack Enterprise" },
-      { name: "description", content: "Sign in to your designated PresenceTrack enclave." },
-      { property: "og:title", content: "Secure Access — PresenceTrack Enterprise" },
-      { property: "og:description", content: "Sign in to your designated PresenceTrack enclave." },
+      { title: "Secure Access — PresenceTrack AI" },
+      { name: "description", content: "Sign in to your designated PresenceTrack AI enclave." },
+      { property: "og:title", content: "Secure Access — PresenceTrack AI" },
+      {
+        property: "og:description",
+        content: "Sign in to your designated PresenceTrack AI enclave.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],

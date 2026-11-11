@@ -18,7 +18,9 @@ export function AuthShell({ children }: { children: ReactNode }) {
         <div className="relative z-10 flex items-center gap-3">
           <BrandMark size="lg" />
           <div>
-            <h1 className="text-2xl font-bold text-umbra">{APP_CONFIG.appName}</h1>
+            <h1 className="text-2xl font-extrabold tracking-tight text-umbra">
+              PRESENCETRACK <span className="text-emerald-500">AI</span>
+            </h1>
             <p className="text-sm text-sage">
               {APP_CONFIG.appVersion} · {APP_CONFIG.dpdpStandard}
             </p>
@@ -38,10 +40,10 @@ export function AuthShell({ children }: { children: ReactNode }) {
           <div className="rounded-xl bg-muted p-4">
             <p className="text-xs leading-relaxed text-sage">
               <span className="font-semibold text-umbra">DPDP Act 2023 Statutory Notice: </span>
-              PresenceTrack Ambient uses passive optical boundary sensors (ESP32-CAM) to detect
-              presence. Facial embeddings are extracted ephemerally, matched against enrolled
-              templates and zeroized (target under 18ms) before retention. Raw video is never
-              recorded. Only match outcomes and dwell metrics are persisted.
+              PresenceTrack AI uses passive optical boundary sensors (ESP32-CAM) to detect presence.
+              Facial embeddings are extracted ephemerally, matched against enrolled templates and
+              zeroized (target under 18ms) before retention. Raw video is never recorded. Only match
+              outcomes and dwell metrics are persisted.
             </p>
           </div>
         </div>

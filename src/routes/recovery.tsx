@@ -9,10 +9,10 @@ import { recordAuthEvent } from "@/lib/auth.functions";
 export const Route = createFileRoute("/recovery")({
   head: () => ({
     meta: [
-      { title: "Credential Recovery — PresenceTrack Enterprise" },
-      { name: "description", content: "Reset your PresenceTrack enclave passcode." },
-      { property: "og:title", content: "Credential Recovery — PresenceTrack Enterprise" },
-      { property: "og:description", content: "Reset your PresenceTrack enclave passcode." },
+      { title: "Credential Recovery — PresenceTrack AI" },
+      { name: "description", content: "Reset your PresenceTrack AI enclave passcode." },
+      { property: "og:title", content: "Credential Recovery — PresenceTrack AI" },
+      { property: "og:description", content: "Reset your PresenceTrack AI enclave passcode." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
     ],

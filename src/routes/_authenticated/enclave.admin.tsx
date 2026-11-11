@@ -29,13 +29,13 @@ import { cn } from "@/lib/utils";
 export const Route = createFileRoute("/_authenticated/enclave/admin")({
   head: () => ({
     meta: [
-      { title: "Governance Console — PresenceTrack" },
+      { title: "Governance Console — PresenceTrack AI" },
       {
         name: "description",
         content:
           "Merkle presence ledger, edge attestation, DPO erasure queue and enclave assignment.",
       },
-      { property: "og:title", content: "Governance Console — PresenceTrack" },
+      { property: "og:title", content: "Governance Console — PresenceTrack AI" },
       {
         property: "og:description",
         content:

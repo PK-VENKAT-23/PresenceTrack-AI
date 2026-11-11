@@ -22,6 +22,7 @@ import { Route as AuthenticatedEnclaveEmployeeRouteImport } from './routes/_auth
 import { Route as AuthenticatedEnclaveHrRouteImport } from './routes/_authenticated/enclave.hr'
 import { Route as AuthenticatedEnclaveSecurityRouteImport } from './routes/_authenticated/enclave.security'
 import { Route as ApiPublicEsp32BoundaryTransitRouteImport } from './routes/api/public/esp32/boundary-transit'
+import { Route as ApiPublicEsp32EnrolledTemplatesRouteImport } from './routes/api/public/esp32/enrolled-templates'
 import { Route as ApiPublicEsp32RegisterNodeRouteImport } from './routes/api/public/esp32/register-node'
 import { Route as ApiPublicEsp32TelemetryRouteImport } from './routes/api/public/esp32/telemetry'
 
@@ -94,6 +95,12 @@ const ApiPublicEsp32BoundaryTransitRoute =
     path: '/api/public/esp32/boundary-transit',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicEsp32EnrolledTemplatesRoute =
+  ApiPublicEsp32EnrolledTemplatesRouteImport.update({
+    id: '/api/public/esp32/enrolled-templates',
+    path: '/api/public/esp32/enrolled-templates',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicEsp32RegisterNodeRoute =
   ApiPublicEsp32RegisterNodeRouteImport.update({
     id: '/api/public/esp32/register-node',
@@ -119,6 +126,7 @@ export interface FileRoutesByFullPath {
   '/enclave/security': typeof AuthenticatedEnclaveSecurityRoute
   '/enclave/': typeof AuthenticatedEnclaveIndexRoute
   '/api/public/esp32/boundary-transit': typeof ApiPublicEsp32BoundaryTransitRoute
+  '/api/public/esp32/enrolled-templates': typeof ApiPublicEsp32EnrolledTemplatesRoute
   '/api/public/esp32/register-node': typeof ApiPublicEsp32RegisterNodeRoute
   '/api/public/esp32/telemetry': typeof ApiPublicEsp32TelemetryRoute
 }
@@ -134,6 +142,7 @@ export interface FileRoutesByTo {
   '/enclave/security': typeof AuthenticatedEnclaveSecurityRoute
   '/enclave': typeof AuthenticatedEnclaveIndexRoute
   '/api/public/esp32/boundary-transit': typeof ApiPublicEsp32BoundaryTransitRoute
+  '/api/public/esp32/enrolled-templates': typeof ApiPublicEsp32EnrolledTemplatesRoute
   '/api/public/esp32/register-node': typeof ApiPublicEsp32RegisterNodeRoute
   '/api/public/esp32/telemetry': typeof ApiPublicEsp32TelemetryRoute
 }
@@ -152,6 +161,7 @@ export interface FileRoutesById {
   '/_authenticated/enclave/security': typeof AuthenticatedEnclaveSecurityRoute
   '/_authenticated/enclave/': typeof AuthenticatedEnclaveIndexRoute
   '/api/public/esp32/boundary-transit': typeof ApiPublicEsp32BoundaryTransitRoute
+  '/api/public/esp32/enrolled-templates': typeof ApiPublicEsp32EnrolledTemplatesRoute
   '/api/public/esp32/register-node': typeof ApiPublicEsp32RegisterNodeRoute
   '/api/public/esp32/telemetry': typeof ApiPublicEsp32TelemetryRoute
 }
@@ -170,6 +180,7 @@ export interface FileRouteTypes {
     | '/enclave/security'
     | '/enclave/'
     | '/api/public/esp32/boundary-transit'
+    | '/api/public/esp32/enrolled-templates'
     | '/api/public/esp32/register-node'
     | '/api/public/esp32/telemetry'
   fileRoutesByTo: FileRoutesByTo
@@ -185,6 +196,7 @@ export interface FileRouteTypes {
     | '/enclave/security'
     | '/enclave'
     | '/api/public/esp32/boundary-transit'
+    | '/api/public/esp32/enrolled-templates'
     | '/api/public/esp32/register-node'
     | '/api/public/esp32/telemetry'
   id:
@@ -202,6 +214,7 @@ export interface FileRouteTypes {
     | '/_authenticated/enclave/security'
     | '/_authenticated/enclave/'
     | '/api/public/esp32/boundary-transit'
+    | '/api/public/esp32/enrolled-templates'
     | '/api/public/esp32/register-node'
     | '/api/public/esp32/telemetry'
   fileRoutesById: FileRoutesById
@@ -214,6 +227,7 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   UnauthorizedRoute: typeof UnauthorizedRoute
   ApiPublicEsp32BoundaryTransitRoute: typeof ApiPublicEsp32BoundaryTransitRoute
+  ApiPublicEsp32EnrolledTemplatesRoute: typeof ApiPublicEsp32EnrolledTemplatesRoute
   ApiPublicEsp32RegisterNodeRoute: typeof ApiPublicEsp32RegisterNodeRoute
   ApiPublicEsp32TelemetryRoute: typeof ApiPublicEsp32TelemetryRoute
 }
@@ -311,6 +325,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicEsp32BoundaryTransitRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/esp32/enrolled-templates': {
+      id: '/api/public/esp32/enrolled-templates'
+      path: '/api/public/esp32/enrolled-templates'
+      fullPath: '/api/public/esp32/enrolled-templates'
+      preLoaderRoute: typeof ApiPublicEsp32EnrolledTemplatesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/esp32/register-node': {
       id: '/api/public/esp32/register-node'
       path: '/api/public/esp32/register-node'
@@ -366,6 +387,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   UnauthorizedRoute: UnauthorizedRoute,
   ApiPublicEsp32BoundaryTransitRoute: ApiPublicEsp32BoundaryTransitRoute,
+  ApiPublicEsp32EnrolledTemplatesRoute: ApiPublicEsp32EnrolledTemplatesRoute,
   ApiPublicEsp32RegisterNodeRoute: ApiPublicEsp32RegisterNodeRoute,
   ApiPublicEsp32TelemetryRoute: ApiPublicEsp32TelemetryRoute,
 }

@@ -74,14 +74,14 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "PresenceTrack Enterprise — Ambient Presence Analytics" },
+      { title: "PresenceTrack AI — Ambient Intelligent Attendance Detection" },
       {
         name: "description",
         content:
           "Passive presence and workspace dwell-time analytics compliant with the DPDP Act 2023, CERT-In directives and the OSH Code.",
       },
       { name: "theme-color", content: "#1F1F1F" },
-      { property: "og:title", content: "PresenceTrack Enterprise" },
+      { property: "og:title", content: "PresenceTrack AI" },
       {
         property: "og:description",
         content:

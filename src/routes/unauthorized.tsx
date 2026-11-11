@@ -21,7 +21,7 @@ export const Route = createFileRoute("/unauthorized")({
   },
   head: () => ({
     meta: [
-      { title: "Access Restricted — PresenceTrack Enterprise" },
+      { title: "Access Restricted — PresenceTrack AI" },
       {
         name: "description",
         content: "Enclave access restriction under DPDP statutory governance.",

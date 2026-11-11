@@ -34,10 +34,10 @@ export function EnclaveHeader({ name, badgeId, avatarUrl, role, onSignOut }: Enc
       <header className="fixed inset-x-0 top-0 z-50 border-b border-border bg-glass backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
           <div className="flex items-center gap-3">
-            <BrandMark />
+            <BrandMark size="md" />
             <div>
-              <h1 className="text-sm font-semibold tracking-tight text-umbra">
-                {APP_CONFIG.appName}
+              <h1 className="text-sm font-extrabold tracking-tight text-umbra">
+                PRESENCETRACK <span className="text-emerald-500">AI</span>
               </h1>
               <p className="hidden text-xs text-sage sm:block">
                 {APP_CONFIG.appVersion} — {APP_CONFIG.dpdpStandard}

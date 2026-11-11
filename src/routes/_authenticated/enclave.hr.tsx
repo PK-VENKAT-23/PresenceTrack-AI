@@ -19,12 +19,12 @@ import { playClick } from "@/lib/sound-engine";
 export const Route = createFileRoute("/_authenticated/enclave/hr")({
   head: () => ({
     meta: [
-      { title: "HR Operations Console — PresenceTrack" },
+      { title: "HR Operations Console — PresenceTrack AI" },
       {
         name: "description",
         content: "Workforce concourse presence, team dwell Gantt, OSH alerts and CSV exports.",
       },
-      { property: "og:title", content: "HR Operations Console — PresenceTrack" },
+      { property: "og:title", content: "HR Operations Console — PresenceTrack AI" },
       {
         property: "og:description",
         content: "Workforce concourse presence, team dwell Gantt, OSH alerts and CSV exports.",

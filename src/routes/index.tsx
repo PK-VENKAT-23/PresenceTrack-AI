@@ -7,13 +7,13 @@ import { BrandMark } from "@/components/presence/layout/BrandMark";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "Welcome — PresenceTrack Enterprise" },
+      { title: "Welcome — PresenceTrack AI" },
       {
         name: "description",
         content:
-          "Privacy-first workplace presence and dwell-time analytics. Get started with PresenceTrack.",
+          "Privacy-first workplace presence and dwell-time analytics. Get started with PresenceTrack AI.",
       },
-      { property: "og:title", content: "Welcome — PresenceTrack Enterprise" },
+      { property: "og:title", content: "Welcome — PresenceTrack AI" },
       {
         property: "og:description",
         content:
@@ -51,8 +51,10 @@ function WelcomePage() {
 
       <header className="relative z-10 mx-auto flex w-full max-w-6xl items-center justify-between px-5 py-5 sm:px-8">
         <div className="flex items-center gap-2.5">
-          <BrandMark />
-          <span className="text-base font-bold text-umbra">{APP_CONFIG.appName}</span>
+          <BrandMark size="md" />
+          <span className="text-base font-extrabold tracking-tight text-umbra">
+            PRESENCETRACK <span className="text-emerald-500">AI</span>
+          </span>
         </div>
         <Link
           to="/login"
