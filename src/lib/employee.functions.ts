@@ -187,7 +187,7 @@ export const updateEmployee = createServerFn({ method: "POST" })
       .from("enterprise_users")
       .update(updates)
       .eq("id", data.id)
-      .select("id, name, email, badge_id, department, role_title, is_active, updated_at")
+      .select("id, name, email, badge_id, department, role_title, is_active")
       .single();
 
     if (error || !updated) {
@@ -486,7 +486,6 @@ export const enrollEmployeeBiometrics = createServerFn({ method: "POST" })
       .from("enterprise_users")
       .update({
         enrolled_embedding: encryptedTemplate as unknown as Json,
-        updated_at: new Date().toISOString(),
       })
       .eq("id", data.employee_id);
 

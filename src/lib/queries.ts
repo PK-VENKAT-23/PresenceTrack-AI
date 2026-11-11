@@ -181,7 +181,7 @@ export const personnelQuery = () =>
       const { data, error } = await supabase
         .from("enterprise_users")
         .select(
-          "id, auth_user_id, email, name, badge_id, department, department_id, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, is_active, employment_type, shift_start, shift_end, created_at, updated_at",
+          "id, auth_user_id, email, name, badge_id, department, department_id, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, is_active, employment_type, shift_start, shift_end, created_at",
         )
         .order("name");
       if (error) throw error;

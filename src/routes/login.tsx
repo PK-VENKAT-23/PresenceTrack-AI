@@ -95,8 +95,13 @@ function LoginPage() {
   const [error, setError] = useState("");
   const [sentTo, setSentTo] = useState<string | null>(null);
 
-  // Already signed in → route straight to assigned enclave
+  // Already signed in → route straight to assigned enclave (unless explicit logout or expired reason)
   useEffect(() => {
+    if (search.reason === "logged_out" || search.reason === "expired") {
+      void supabase.auth.signOut();
+      return;
+    }
+
     supabase.auth.getUser().then(async ({ data }) => {
       if (data.user) {
         const { data: roleRow } = await supabase
@@ -107,7 +112,7 @@ function LoginPage() {
         navigate({ to: enclavePathFor(roleRow?.role as UserRole), replace: true });
       }
     });
-  }, [navigate]);
+  }, [navigate, search.reason]);
 
   const handleSignIn = async (e: FormEvent) => {
     e.preventDefault();

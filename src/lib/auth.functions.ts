@@ -317,7 +317,7 @@ export const activateEmployee = createServerFn({ method: "POST" })
 
     const { data: emp, error } = await context.supabase
       .from("enterprise_users")
-      .update({ is_active: true, updated_at: new Date().toISOString() })
+      .update({ is_active: true })
       .eq("id", data.employee_id)
       .select("id, name, email, badge_id")
       .single();

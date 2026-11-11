@@ -41,6 +41,22 @@ function ErrorComponent({ error, reset }: ErrorComponentProps) {
     reportLovableError(error, { boundary: "tanstack_root_error_component" });
   }, [error]);
 
+  const handleSignOut = async () => {
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // ignore
+    }
+    window.location.href = "/login?reason=logged_out";
+  };
+
+  const errorMessage =
+    error instanceof Error
+      ? error.message
+      : typeof error === "object" && error && "message" in error
+        ? String((error as { message: unknown }).message)
+        : String(error ?? "An unexpected error occurred");
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="glass-card max-w-md p-8 text-center">
@@ -50,6 +66,11 @@ function ErrorComponent({ error, reset }: ErrorComponentProps) {
         <p className="mt-2 text-sm text-muted-foreground">
           Something went wrong on our end. You can try refreshing or head back.
         </p>
+        {import.meta.env.DEV && errorMessage && (
+          <div className="mt-3 overflow-x-auto rounded-lg bg-destructive/10 p-2 text-left font-mono text-xs text-destructive">
+            {errorMessage}
+          </div>
+        )}
         <div className="mt-6 flex flex-wrap justify-center gap-2">
           <button
             onClick={() => {
@@ -63,6 +84,9 @@ function ErrorComponent({ error, reset }: ErrorComponentProps) {
           <a href="/login" className="glass-btn">
             Go to sign in
           </a>
+          <button type="button" onClick={handleSignOut} className="glass-btn text-destructive">
+            Sign out
+          </button>
         </div>
       </div>
     </div>
