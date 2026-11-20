@@ -16,15 +16,12 @@ function EnclaveLayout() {
   const navigate = useNavigate();
 
   const handleSignOut = async () => {
-    if (user?.id) {
-      recordAuthEvent({
-        data: {
-          action: "auth.logout",
-          actor_id: user.id,
-          email: user.email ?? undefined,
-        },
-      }).catch(() => {});
-    }
+    recordAuthEvent({
+      data: {
+        action: "auth.logout",
+        email: user?.email ?? undefined,
+      },
+    }).catch(() => {});
     await queryClient.cancelQueries();
     queryClient.clear();
     await supabase.auth.signOut();

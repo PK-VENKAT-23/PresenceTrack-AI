@@ -34,12 +34,15 @@ class EventDispatcher:
         camera_id: str = config.camera_id,
         debounce_seconds: float = config.debounce_seconds,
         timeout_sec: float = config.request_timeout_sec,
+        camera_source: str = config.camera_source,
     ):
         self.backend_url = backend_url.rstrip("/")
         self.device_key = device_key
         self.camera_id = camera_id
         self.debounce_seconds = debounce_seconds
         self.timeout_sec = timeout_sec
+        self.camera_source = camera_source
+        self.last_heartbeat_error: Optional[str] = None
 
         # Local debounce cache: (identifier, direction, zone_to) -> timestamp
         self._debounce_cache: Dict[Tuple[str, str, str], float] = {}
@@ -186,7 +189,7 @@ class EventDispatcher:
         payload = dict(telemetry_data)
         if "timestamp" not in payload:
             from datetime import datetime, timezone
-            payload["timestamp"] = datetime.now(timezone.utc).isoformat()
+            payload["timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if "event_nonce" not in payload:
             payload["event_nonce"] = uuid.uuid4().hex
 
@@ -194,5 +197,80 @@ class EventDispatcher:
             resp = requests.post(url, json=payload, headers=headers, timeout=2.0)
             return resp.status_code == 200
         except Exception:
+            return False
+
+    def fetch_enrolled_templates(self) -> Optional[list]:
+        """
+        Fetch active encrypted biometric templates from the backend.
+        Requires valid x-device-key header.
+        """
+        url = f"{self.backend_url}/api/public/esp32/enrolled-templates"
+        headers = {
+            "x-device-key": self.device_key,
+            "Accept": "application/json",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=self.timeout_sec)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("templates", [])
+            return None
+        except Exception:
+            return None
+
+    def register_camera_node(self, is_online: bool = True) -> bool:
+        """
+        Register camera node with backend /api/public/esp32/register-node endpoint.
+        Transmits actual hardware online status (is_online=True only when fresh frames arrive).
+        Returns True only when backend responds HTTP 200 and JSON success is True.
+        Returns False on HTTP errors, malformed responses, or request exceptions.
+        """
+        url = f"{self.backend_url}/api/public/esp32/register-node"
+        headers = {
+            "x-device-key": self.device_key,
+            "Content-Type": "application/json",
+        }
+
+        payload: Dict[str, Any] = {
+            "id": self.camera_id,
+            "stream_url": getattr(self, "camera_source", getattr(config, "camera_source", "")),
+            "boundary_name": "North Entrance Camera",
+            "zone_a": getattr(config, "zone_a", "CORRIDOR_TRANSIT"),
+            "zone_b": getattr(config, "zone_b", "WORKSPACE_FLOOR"),
+            "is_online": bool(is_online),
+            "fps": getattr(config, "target_fps", 15),
+            "firmware_version": "gateway-v1.1.0",
+        }
+
+        if hasattr(config, "boundary_coords") and config.boundary_coords and len(config.boundary_coords) == 4:
+            c = config.boundary_coords
+            payload["boundary_coordinates"] = {
+                "x1": c[0],
+                "y1": c[1],
+                "x2": c[2],
+                "y2": c[3],
+            }
+
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout_sec)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if data.get("success") is True:
+                        self.last_heartbeat_error = None
+                        return True
+                    err_msg = data.get("error", "API returned success=False")
+                    self.last_heartbeat_error = f"API error: {err_msg}"
+                    return False
+                except Exception as json_err:
+                    self.last_heartbeat_error = f"Malformed JSON response: {json_err}"
+                    return False
+            self.last_heartbeat_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            return False
+        except requests.exceptions.RequestException as req_err:
+            self.last_heartbeat_error = f"RequestException: {req_err}"
+            return False
+        except Exception as exc:
+            self.last_heartbeat_error = f"{type(exc).__name__}: {exc}"
             return False
 

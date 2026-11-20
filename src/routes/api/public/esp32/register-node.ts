@@ -26,7 +26,17 @@ const RegisterSchema = z.object({
     })
     .optional(),
   firmware_version: z.string().trim().max(32).optional(),
+  free_heap: z.number().int().nonnegative().optional(),
+  wifi_rssi: z.number().int().optional(),
+  uptime_sec: z.number().int().nonnegative().optional(),
 });
+
+// Local in-memory node registry for development environments where SUPABASE_SERVICE_ROLE_KEY is not configured
+const inMemoryCameraNodes = new Map<string, unknown>();
+
+export function getInMemoryCameraNodes() {
+  return Array.from(inMemoryCameraNodes.values());
+}
 
 /** Called by ESP32-CAM firmware on boot and every heartbeat (15s). Requires the x-device-key header. */
 export const Route = createFileRoute("/api/public/esp32/register-node")({
@@ -35,15 +45,6 @@ export const Route = createFileRoute("/api/public/esp32/register-node")({
       POST: async ({ request }) => {
         const denied = rejectUnlessDevice(request, process.env["ESP32_DEVICE_KEY"]);
         if (denied) return denied;
-
-        const { hasSupabaseAdminConfigured } =
-          await import("@/integrations/supabase/client.server");
-        if (!hasSupabaseAdminConfigured()) {
-          return Response.json(
-            { success: false, error: "Database admin service key is not configured" },
-            { status: 503 },
-          );
-        }
 
         let body: unknown;
         try {
@@ -72,16 +73,46 @@ export const Route = createFileRoute("/api/public/esp32/register-node")({
           firmware_version: n.firmware_version ?? "v1.0.0",
         };
 
-        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-        const { error } = await supabaseAdmin.from("esp32_camera_nodes").upsert(node);
-        if (error) {
-          console.error("register-node upsert failed", error.message);
-          return Response.json(
-            { success: false, error: "Failed to register node" },
-            { status: 500 },
-          );
+        const { hasSupabaseAdminConfigured } =
+          await import("@/integrations/supabase/client.server");
+
+        if (hasSupabaseAdminConfigured()) {
+          try {
+            const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+            const { error } = await supabaseAdmin.from("esp32_camera_nodes").upsert(node);
+            if (error) {
+              console.error("[register-node] Supabase upsert error:", error.message);
+              // Fall back to in-memory store so edge heartbeat is never severed
+              inMemoryCameraNodes.set(node.id, node);
+              return Response.json({
+                success: true,
+                message: "Node registered (fallback memory store: database error)",
+                node,
+              });
+            }
+            return Response.json({ success: true, message: "Node registered in database", node });
+          } catch (err) {
+            console.error("[register-node] Database operation failed:", err);
+            inMemoryCameraNodes.set(node.id, node);
+            return Response.json({
+              success: true,
+              message: "Node registered (fallback memory store)",
+              node,
+            });
+          }
         }
-        return Response.json({ success: true, message: "Node registered", node });
+
+        // Development fallback: service role key not provided in local .env
+        inMemoryCameraNodes.set(node.id, node);
+        console.warn(
+          "[register-node] NOTICE: SUPABASE_SERVICE_ROLE_KEY is not set in .env. Node registered in local memory cache.",
+        );
+        return Response.json({
+          success: true,
+          message:
+            "Node registered (local memory cache - provide SUPABASE_SERVICE_ROLE_KEY for persistence)",
+          node,
+        });
       },
     },
   },

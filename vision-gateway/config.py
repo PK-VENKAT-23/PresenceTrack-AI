@@ -4,8 +4,22 @@ Loads settings from environment variables with safe defaults.
 """
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Tuple
+
+from dotenv import load_dotenv
+
+
+GATEWAY_DIR = Path(__file__).resolve().parent
+load_dotenv(GATEWAY_DIR / ".env", override=False)
+
+
+def _model_path(env_name: str, default_name: str) -> str:
+    path = Path(os.getenv(env_name, str(GATEWAY_DIR / default_name))).expanduser()
+    if not path.is_absolute():
+        path = GATEWAY_DIR / path
+    return str(path.resolve())
 
 
 @dataclass
@@ -20,7 +34,7 @@ class GatewayConfig:
     max_reconnect_attempts: int = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "10"))
 
     # Backend API settings
-    backend_api_url: str = os.getenv("BACKEND_API_URL", "http://localhost:3000").rstrip("/")
+    backend_api_url: str = os.getenv("BACKEND_API_URL", "http://localhost:8080").rstrip("/")
     device_key: str = os.getenv("ESP32_DEVICE_KEY", "dev-presence-device-key-32")
     request_timeout_sec: float = float(os.getenv("REQUEST_TIMEOUT_SEC", "5.0"))
 
@@ -34,11 +48,11 @@ class GatewayConfig:
     # Recognition & Detection Model Settings
     # Backend options: "sface" (OpenCV SFace 128-d deep model) or "adapter"
     recognition_backend: str = os.getenv("RECOGNITION_BACKEND", "sface")
-    sface_model_path: str = os.getenv(
-        "SFACE_MODEL_PATH", "vision-gateway/models/face_recognition_sface_2021dec.onnx"
+    sface_model_path: str = _model_path(
+        "SFACE_MODEL_PATH", "models/face_recognition_sface_2021dec.onnx"
     )
-    yunet_model_path: str = os.getenv(
-        "YUNET_MODEL_PATH", "vision-gateway/models/face_detection_yunet_2023mar.onnx"
+    yunet_model_path: str = _model_path(
+        "YUNET_MODEL_PATH", "models/face_detection_yunet_2023mar.onnx"
     )
     expected_embedding_dim: int = int(os.getenv("EXPECTED_EMBEDDING_DIM", "128"))
 

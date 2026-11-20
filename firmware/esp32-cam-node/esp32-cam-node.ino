@@ -80,59 +80,95 @@ const unsigned long WIFI_CHECK_INTERVAL_MS = 10000;
 // ==========================================
 // 3. MJPEG STREAM HANDLER (PORT 81 /stream)
 // ==========================================
+
 static esp_err_t stream_handler(httpd_req_t *req) {
-  camera_fb_t *fb = NULL;
-  esp_err_t res = ESP_OK;
-  size_t _jpg_buf_len = 0;
-  uint8_t * _jpg_buf = NULL;
-  char part_buf[64];
+    camera_fb_t *fb = NULL;
+    esp_err_t res = ESP_OK;
 
-  res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
-  if (res != ESP_OK) return res;
+    size_t _jpg_buf_len = 0;
+    uint8_t *_jpg_buf = NULL;
+    char part_buf[64];
 
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
+    if (res != ESP_OK) return res;
 
-  while (true) {
-    int64_t frame_start = esp_timer_get_time();
-    fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("[ESP32-CAM] Frame buffer acquire failed");
-      res = ESP_FAIL;
-    } else {
-      _jpg_buf_len = fb->len;
-      _jpg_buf = fb->buf;
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    while (true) {
+        int64_t frame_start = esp_timer_get_time();
+
+        fb = esp_camera_fb_get();
+
+        if (!fb) {
+            Serial.println("[ESP32-CAM] Frame buffer acquire failed");
+            res = ESP_FAIL;
+        } else {
+            bool converted = frame2jpg(
+                fb, 80, &_jpg_buf, &_jpg_buf_len
+            );
+
+            if (!converted) {
+                Serial.println("[ESP32-CAM] RGB565 to JPEG conversion failed");
+                res = ESP_FAIL;
+            }
+        }
+
+        // Send JPEG frame header
+        if (res == ESP_OK) {
+            size_t hlen = snprintf(
+                part_buf,
+                sizeof(part_buf),
+                _STREAM_PART,
+                _jpg_buf_len
+            );
+
+            res = httpd_resp_send_chunk(req, part_buf, hlen);
+        }
+
+        // Send JPEG image data
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(
+                req,
+                (const char *)_jpg_buf,
+                _jpg_buf_len
+            );
+        }
+
+        // Send MJPEG boundary
+        if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(
+                req,
+                _STREAM_BOUNDARY,
+                strlen(_STREAM_BOUNDARY)
+            );
+        }
+
+        // Free converted JPEG memory
+        if (_jpg_buf != NULL) {
+            free(_jpg_buf);
+            _jpg_buf = NULL;
+        }
+
+        // Return camera framebuffer
+        if (fb != NULL) {
+            esp_camera_fb_return(fb);
+            fb = NULL;
+        }
+
+        if (res != ESP_OK) break;
+
+        int64_t frame_time =
+            (esp_timer_get_time() - frame_start) / 1000;
+
+        if (frame_time < 66) {
+            vTaskDelay(pdMS_TO_TICKS(66 - frame_time));
+        }
     }
 
-    if (res == ESP_OK) {
-      size_t hlen = snprintf(part_buf, 64, _STREAM_PART, _jpg_buf_len);
-      res = httpd_resp_send_chunk(req, part_buf, hlen);
-    }
-    if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
-    }
-    if (res == ESP_OK) {
-      res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
-    }
-
-    if (fb) {
-      // DPDP Act 2023 Compliance: Volatile buffer release
-      esp_camera_fb_return(fb);
-      fb = NULL;
-      _jpg_buf = NULL;
-    }
-
-    if (res != ESP_OK) {
-      break;
-    }
-    
-    // Target 15 FPS (~66ms frame window)
-    int64_t frame_time = (esp_timer_get_time() - frame_start) / 1000;
-    if (frame_time < 66) {
-      vTaskDelay(pdMS_TO_TICKS(66 - frame_time));
-    }
-  }
-  return res;
+    return res;
 }
+
+
 
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -159,15 +195,24 @@ void startCameraServer() {
 void registerNodeWithBackend() {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFiClientSecure client;
-  client.setInsecure(); // TODO: pin the server certificate for production
+  bool isHttps = (strncmp(BACKEND_HOST, "https://", 8) == 0);
+  WiFiClient plainClient;
+  WiFiClientSecure secureClient;
+  if (isHttps) {
+    secureClient.setInsecure(); // TODO: pin the server certificate for production
+  }
+
   HTTPClient http;
   http.setTimeout(HTTP_TIMEOUT_MS);
 
   String registerUrl = String(BACKEND_HOST) + "/api/public/esp32/register-node";
   String myStreamUrl = "http://" + WiFi.localIP().toString() + ":81/stream";
 
-  if (!http.begin(client, registerUrl)) {
+  bool beginOk = isHttps
+    ? http.begin(secureClient, registerUrl)
+    : http.begin(plainClient, registerUrl);
+
+  if (!beginOk) {
     Serial.println(F("[ESP32-CAM] Failed to initialize HTTP client for registration"));
     return;
   }
@@ -204,13 +249,22 @@ void registerNodeWithBackend() {
 void sendBoundaryTransitEvent(const char* userId, const char* direction, float cosineScore, float scrubMs, const char* vectorHash) {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFiClientSecure client;
-  client.setInsecure(); // TODO: pin the server certificate for production
+  bool isHttps = (strncmp(BACKEND_HOST, "https://", 8) == 0);
+  WiFiClient plainClient;
+  WiFiClientSecure secureClient;
+  if (isHttps) {
+    secureClient.setInsecure(); // TODO: pin the server certificate for production
+  }
+
   HTTPClient http;
   http.setTimeout(HTTP_TIMEOUT_MS);
 
   String transitUrl = String(BACKEND_HOST) + "/api/public/esp32/boundary-transit";
-  if (!http.begin(client, transitUrl)) {
+  bool beginOk = isHttps
+    ? http.begin(secureClient, transitUrl)
+    : http.begin(plainClient, transitUrl);
+
+  if (!beginOk) {
     Serial.println(F("[ESP32-CAM] Failed to initialize HTTP client for transit event"));
     return;
   }
@@ -260,38 +314,39 @@ void setup() {
   digitalWrite(FLASH_LED_PIN, LOW); // Flash LED off
 
   // Camera Configuration
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer   = LEDC_TIMER_0;
-  config.pin_d0       = Y2_GPIO_NUM;
-  config.pin_d1       = Y3_GPIO_NUM;
-  config.pin_d2       = Y4_GPIO_NUM;
-  config.pin_d3       = Y5_GPIO_NUM;
-  config.pin_d4       = Y6_GPIO_NUM;
-  config.pin_d5       = Y7_GPIO_NUM;
-  config.pin_d6       = Y8_GPIO_NUM;
-  config.pin_d7       = Y9_GPIO_NUM;
-  config.pin_xclk     = XCLK_GPIO_NUM;
-  config.pin_pclk     = PCLK_GPIO_NUM;
-  config.pin_vsync    = VSYNC_GPIO_NUM;
-  config.pin_href     = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn     = PWDN_GPIO_NUM;
-  config.pin_reset    = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
 
-  // Frame size & quality depending on PSRAM presence
-  if (psramFound()) {
-    config.frame_size = FRAMESIZE_VGA; // 640x480 for clear facial boundary recognition
-    config.jpeg_quality = 12;          // 0-63, lower means higher quality
-    config.fb_count = 2;
-  } else {
-    config.frame_size = FRAMESIZE_QVGA; // 320x240 fallback
-    config.jpeg_quality = 15;
-    config.fb_count = 1;
-  }
+camera_config_t config = {};
+
+config.ledc_channel = LEDC_CHANNEL_0;
+config.ledc_timer = LEDC_TIMER_0;
+
+config.pin_d0 = Y2_GPIO_NUM;
+config.pin_d1 = Y3_GPIO_NUM;
+config.pin_d2 = Y4_GPIO_NUM;
+config.pin_d3 = Y5_GPIO_NUM;
+config.pin_d4 = Y6_GPIO_NUM;
+config.pin_d5 = Y7_GPIO_NUM;
+config.pin_d6 = Y8_GPIO_NUM;
+config.pin_d7 = Y9_GPIO_NUM;
+
+config.pin_xclk = XCLK_GPIO_NUM;
+config.pin_pclk = PCLK_GPIO_NUM;
+config.pin_vsync = VSYNC_GPIO_NUM;
+config.pin_href = HREF_GPIO_NUM;
+
+config.pin_sccb_sda = SIOD_GPIO_NUM;
+config.pin_sccb_scl = SIOC_GPIO_NUM;
+
+config.pin_pwdn = PWDN_GPIO_NUM;
+config.pin_reset = RESET_GPIO_NUM;
+
+config.xclk_freq_hz = 20000000;
+
+config.pixel_format = PIXFORMAT_RGB565;
+config.frame_size = FRAMESIZE_QVGA;
+config.fb_location = CAMERA_FB_IN_PSRAM;
+config.fb_count = 1;
+config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
   // Camera init
   esp_err_t err = esp_camera_init(&config);
@@ -300,13 +355,59 @@ void setup() {
     return;
   }
 
-  sensor_t * s = esp_camera_sensor_get();
-  // Sensor adjustment for indoor ambient light
-  s->set_brightness(s, 1);
-  s->set_contrast(s, 1);
-  s->set_saturation(s, 0);
+  sensor_t *s = esp_camera_sensor_get();
 
-  // Wi-Fi Connection
+if (s != nullptr) {
+    s->set_brightness(s, 1);
+    s->set_contrast(s, 1);
+    s->set_saturation(s, 0);
+}
+
+// Wi-Fi connection diagnostics
+WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+
+    if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) {
+        Serial.println("[WiFi Debug] Connected to hotspot access point.");
+    }
+
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+        Serial.printf(
+            "[WiFi Debug] Disconnected. Reason code: %d\n",
+            (int)info.wifi_sta_disconnected.reason
+        );
+    }
+
+});
+
+// Temporary Wi-Fi network scan diagnostics
+WiFi.mode(WIFI_STA);
+delay(500);
+
+Serial.println("\n[WiFi Scan] Scanning nearby networks...");
+
+int networkCount = WiFi.scanNetworks(false, true);
+
+if (networkCount == 0) {
+    Serial.println("[WiFi Scan] No networks found.");
+} else if (networkCount < 0) {
+    Serial.printf("[WiFi Scan] Scan failed: %d\n", networkCount);
+} else {
+    Serial.printf("[WiFi Scan] Found %d networks:\n", networkCount);
+
+    for (int i = 0; i < networkCount; i++) {
+        Serial.printf(
+            "[WiFi Scan] SSID: %s | RSSI: %d dBm | Channel: %d\n",
+            WiFi.SSID(i).c_str(),
+            WiFi.RSSI(i),
+            WiFi.channel(i)
+        );
+    }
+}
+
+WiFi.scanDelete();
+
+Serial.println("[WiFi Scan] Scan complete.");
+// Wi-Fi Connection
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("[ESP32-CAM] Connecting to Wi-Fi");
   int attempts = 0;

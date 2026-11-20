@@ -140,7 +140,7 @@ export function MonthlyAttendanceCalendar({ employeeId }: MonthlyAttendanceCalen
         <div className="stat-card p-3">
           <div className="text-xxs text-sage">Present Days</div>
           <div className="mt-1 font-mono text-base font-bold text-success-strong">
-            {data?.summary?.present_days ?? 0}
+            {data?.present_days ?? 0}
           </div>
           <div className="text-xxxs text-sage">of {daysInMonth} days</div>
         </div>
@@ -148,13 +148,13 @@ export function MonthlyAttendanceCalendar({ employeeId }: MonthlyAttendanceCalen
         <div className="stat-card p-3">
           <div className="text-xxs text-sage">Total Work Time</div>
           <div className="mt-1 font-mono text-base font-bold text-umbra">
-            {formatMinutes(data?.summary?.total_work_minutes ?? 0)}
+            {formatMinutes(data?.total_work_minutes ?? 0)}
           </div>
           <div className="text-xxxs text-sage">
             Avg{" "}
-            {data?.summary?.present_days
+            {data?.present_days
               ? Math.round(
-                  (data.summary.total_work_minutes / data.summary.present_days / 60) * 10,
+                  (data.total_work_minutes / data.present_days / 60) * 10,
                 ) / 10
               : 0}
             h / day
@@ -164,7 +164,7 @@ export function MonthlyAttendanceCalendar({ employeeId }: MonthlyAttendanceCalen
         <div className="stat-card p-3">
           <div className="text-xxs text-sage">Total Breaks</div>
           <div className="mt-1 font-mono text-base font-bold text-warning-strong">
-            {formatMinutes(data?.summary?.total_break_minutes ?? 0)}
+            {formatMinutes(data?.total_break_minutes ?? 0)}
           </div>
           <div className="text-xxxs text-sage">Lounge & cafeteria</div>
         </div>
@@ -172,7 +172,7 @@ export function MonthlyAttendanceCalendar({ employeeId }: MonthlyAttendanceCalen
         <div className="stat-card p-3">
           <div className="text-xxs text-sage">Half Days</div>
           <div className="mt-1 font-mono text-base font-bold text-amber-500">
-            {data?.summary?.half_days ?? 0}
+            {data?.half_days ?? 0}
           </div>
           <div className="text-xxxs text-sage">&lt; 4 hours desk time</div>
         </div>
@@ -180,7 +180,7 @@ export function MonthlyAttendanceCalendar({ employeeId }: MonthlyAttendanceCalen
         <div className="stat-card p-3">
           <div className="text-xxs text-sage">Missed Exits</div>
           <div className="mt-1 font-mono text-base font-bold text-destructive">
-            {data?.summary?.missed_exits ?? 0}
+            {data?.missed_exits ?? 0}
           </div>
           <div className="text-xxxs text-sage">Unclosed day transits</div>
         </div>

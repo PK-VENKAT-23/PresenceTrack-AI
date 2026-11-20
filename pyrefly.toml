@@ -1,0 +1,15 @@
+# Pyrefly Language Server configuration for PresenceTrack Vision Gateway
+project-includes = [
+    "vision-gateway",
+]
+
+search-path = [
+    "vision-gateway",
+    "vision-gateway/.venv/lib/python3.13/site-packages",
+]
+
+site-packages-path = [
+    "vision-gateway/.venv/lib/python3.13/site-packages",
+]
+
+python-interpreter-path = "vision-gateway/.venv/bin/python"

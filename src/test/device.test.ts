@@ -108,4 +108,40 @@ describe("ESP32 Device Management & Security", () => {
     // Server unconfigured -> 503 Service Unavailable
     expect(rejectUnlessDevice(makeReq(key), undefined)?.status).toBe(503);
   });
+
+  it("handles ESP32 hardware registration request and returns valid JSON response", async () => {
+    const key = "test-esp32-device-key-32";
+    process.env["ESP32_DEVICE_KEY"] = key;
+
+    const { Route } = await import("@/routes/api/public/esp32/register-node");
+    const postHandler = (Route.options as any).server?.handlers?.POST;
+
+    const esp32Payload = {
+      id: "ESP32-CAM-01-NORTH",
+      stream_url: "http://192.168.1.18:81/stream",
+      boundary_name: "Corridor -> Workspace Floor",
+      zone_a: "CORRIDOR_TRANSIT",
+      zone_b: "WORKSPACE_FLOOR",
+      is_online: true,
+      fps: 15.0,
+    };
+
+    const req = new Request("http://192.168.1.8:8080/api/public/esp32/register-node", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-device-key": key,
+      },
+      body: JSON.stringify(esp32Payload),
+    });
+
+    const res = await postHandler({ request: req });
+    expect(res.status).toBe(200);
+
+    const data = await res.json();
+    expect(data.success).toBe(true);
+    expect(data.node.id).toBe("ESP32-CAM-01-NORTH");
+    expect(data.node.stream_url).toBe("http://192.168.1.18:81/stream");
+    expect(data.node.is_online).toBe(true);
+  });
 });

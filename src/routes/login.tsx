@@ -15,31 +15,23 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { AuthShell } from "@/components/presence/layout/AuthShell";
 import { playClick, playTransitBlip } from "@/lib/sound-engine";
-import { cn } from "@/lib/utils";
 import { enclavePathFor } from "@/lib/enclaves";
 import { recordAuthEvent } from "@/lib/auth.functions";
 import type { UserRole } from "@/lib/ambient";
 
 type LoginSearch = {
-  mode?: "signin" | "setup";
   reason?: "expired" | "deactivated" | "logged_out";
 };
 
 export const Route = createFileRoute("/login")({
   validateSearch: (search: Record<string, unknown>): LoginSearch => {
-    const mode = search["mode"];
     const reason = search["reason"];
+    const validReason =
+      reason === "expired" || reason === "deactivated" || reason === "logged_out"
+        ? (reason as "expired" | "deactivated" | "logged_out")
+        : undefined;
     return {
-      mode:
-        mode === "signup" || mode === "signin"
-          ? mode === "signup"
-            ? "setup"
-            : "signin"
-          : undefined,
-      reason:
-        reason === "expired" || reason === "deactivated" || reason === "logged_out"
-          ? reason
-          : undefined,
+      ...(validReason ? { reason: validReason } : {}),
     };
   },
   head: () => ({
@@ -81,19 +73,16 @@ const ENCLAVES = [
   },
 ];
 
+const VALID_ROLES: UserRole[] = ["employee", "hr_ops", "security", "super_admin"];
+
 function LoginPage() {
   const navigate = useNavigate();
   const search = Route.useSearch();
-  const [mode, setMode] = useState<"signin" | "setup">(
-    search.mode === "setup" ? "setup" : "signin",
-  );
-  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [sentTo, setSentTo] = useState<string | null>(null);
 
   // Already signed in → route straight to assigned enclave (unless explicit logout or expired reason)
   useEffect(() => {
@@ -102,14 +91,52 @@ function LoginPage() {
       return;
     }
 
-    supabase.auth.getUser().then(async ({ data }) => {
-      if (data.user) {
-        const { data: roleRow } = await supabase
-          .from("user_roles")
-          .select("role")
-          .eq("user_id", data.user.id)
-          .maybeSingle();
-        navigate({ to: enclavePathFor(roleRow?.role as UserRole), replace: true });
+    supabase.auth.getUser().then(async ({ data, error: userErr }) => {
+      if (userErr || !data?.user) return;
+
+      const [{ data: roleRow, error: roleErr }, { data: profiles, error: profileErr }] =
+        await Promise.all([
+          supabase.from("user_roles").select("role").eq("user_id", data.user.id).maybeSingle(),
+          supabase
+            .from("enterprise_users")
+            .select("id, auth_user_id, is_active, invitation_status")
+            .eq("auth_user_id", data.user.id),
+        ]);
+
+      if (roleErr || profileErr || !profiles || profiles.length !== 1) {
+        await supabase.auth.signOut();
+        navigate({ to: "/unauthorized", search: { reason: "forbidden" }, replace: true });
+        return;
+      }
+
+      const profile = profiles[0];
+    if (!profile) {
+      await supabase.auth.signOut();
+      navigate({ to: "/unauthorized", search: { reason: "forbidden" }, replace: true });
+      return;
+    }
+      if (!profile) {
+        await supabase.auth.signOut();
+        navigate({ to: "/unauthorized", search: { reason: "forbidden" }, replace: true });
+        return;
+      }
+      if (profile.invitation_status === "RECONCILIATION_REQUIRED") {
+        await supabase.auth.signOut();
+        navigate({ to: "/unauthorized", search: { reason: "quarantined" }, replace: true });
+      } else if (profile.is_active === false) {
+        await supabase.auth.signOut();
+        navigate({ to: "/unauthorized", search: { reason: "deactivated" }, replace: true });
+      } else if (profile.invitation_status !== "LINKED") {
+        await supabase.auth.signOut();
+        navigate({ to: "/unauthorized", search: { reason: "forbidden" }, replace: true });
+      } else {
+        const candidateRole = roleRow?.role as UserRole | undefined;
+        if (!candidateRole || !VALID_ROLES.includes(candidateRole)) {
+          await supabase.auth.signOut();
+          navigate({ to: "/unauthorized", search: { reason: "no_role" }, replace: true });
+        } else {
+          navigate({ to: enclavePathFor(candidateRole), replace: true });
+        }
       }
     });
   }, [navigate, search.reason]);
@@ -127,81 +154,125 @@ function LoginPage() {
 
     setLoading(false);
 
-    if (authErr) {
+    if (authErr || !authData?.user) {
       // Record failed authentication attempt safely (no password in logs)
       recordAuthEvent({
         data: {
           action: "auth.login_failed",
           email: emailTrimmed,
-          metadata: { reason: authErr.message },
+          metadata: { reason: authErr?.message ?? "Authentication failed" },
         },
       }).catch(() => {});
 
       setError(
-        /confirm/i.test(authErr.message)
+        authErr && /confirm/i.test(authErr.message)
           ? "Please verify your email first — open the verification link we sent you."
           : "Invalid corporate email or passcode.",
       );
       return;
     }
 
-    // Check role and enterprise profile
-    const [{ data: roleRow }, { data: profile }] = await Promise.all([
-      supabase.from("user_roles").select("role").eq("user_id", authData.user.id).maybeSingle(),
-      supabase
-        .from("enterprise_users")
-        .select("is_active")
-        .eq("auth_user_id", authData.user.id)
-        .maybeSingle(),
-    ]);
+    // Fail-closed authorization check: query role and enterprise profile
+    const [{ data: roleRow, error: roleErr }, { data: profiles, error: profileErr }] =
+      await Promise.all([
+        supabase.from("user_roles").select("role").eq("user_id", authData.user.id).maybeSingle(),
+        supabase
+          .from("enterprise_users")
+          .select("id, auth_user_id, is_active, invitation_status")
+          .eq("auth_user_id", authData.user.id),
+      ]);
+
+    // Query errors, missing profile, or duplicate profiles -> fail closed
+    if (roleErr || profileErr || !profiles || profiles.length !== 1) {
+      await supabase.auth.signOut();
+      recordAuthEvent({
+        data: {
+          action: "auth.unauthorized_access",
+          email: emailTrimmed,
+          metadata: { reason: "forbidden_profile_defect" },
+        },
+      }).catch(() => {});
+      navigate({ to: "/unauthorized", search: { reason: "forbidden" }, replace: true });
+      return;
+    }
+
+    const profile = profiles[0];
+    if (!profile) {
+      await supabase.auth.signOut();
+      navigate({ to: "/unauthorized", search: { reason: "forbidden" }, replace: true });
+      return;
+    }
+
+    // Check if account is in security quarantine
+    if (profile.invitation_status === "RECONCILIATION_REQUIRED") {
+      await supabase.auth.signOut();
+      recordAuthEvent({
+        data: {
+          action: "auth.unauthorized_access",
+          email: emailTrimmed,
+          metadata: { reason: "quarantined" },
+        },
+      }).catch(() => {});
+      navigate({ to: "/unauthorized", search: { reason: "quarantined" }, replace: true });
+      return;
+    }
 
     // Check if account is deactivated
-    if (profile && profile.is_active === false) {
+    if (profile.is_active === false) {
       await supabase.auth.signOut();
+      recordAuthEvent({
+        data: {
+          action: "auth.unauthorized_access",
+          email: emailTrimmed,
+          metadata: { reason: "deactivated" },
+        },
+      }).catch(() => {});
       navigate({ to: "/unauthorized", search: { reason: "deactivated" }, replace: true });
       return;
     }
 
-    // Record successful login audit
+    // Check if invitation is fully linked
+    if (profile.invitation_status !== "LINKED") {
+      await supabase.auth.signOut();
+      recordAuthEvent({
+        data: {
+          action: "auth.unauthorized_access",
+          email: emailTrimmed,
+          metadata: { reason: "unlinked" },
+        },
+      }).catch(() => {});
+      navigate({ to: "/unauthorized", search: { reason: "forbidden" }, replace: true });
+      return;
+    }
+
+    const candidateRole = roleRow?.role as UserRole | undefined;
+    if (!candidateRole || !VALID_ROLES.includes(candidateRole)) {
+      await supabase.auth.signOut();
+      recordAuthEvent({
+        data: {
+          action: "auth.unauthorized_access",
+          email: emailTrimmed,
+          metadata: { reason: "no_role" },
+        },
+      }).catch(() => {});
+      navigate({ to: "/unauthorized", search: { reason: "no_role" }, replace: true });
+      return;
+    }
+
+    // Record successful login audit only after all authorization checks pass
     recordAuthEvent({
       data: {
         action: "auth.login_success",
-        actor_id: authData.user.id,
         email: emailTrimmed,
-        metadata: { role: roleRow?.role ?? "unassigned" },
+        metadata: { role: candidateRole },
       },
     }).catch(() => {});
 
     playClick();
     playTransitBlip();
 
-    const target = enclavePathFor(roleRow?.role as UserRole);
+    const target = enclavePathFor(candidateRole);
     navigate({ to: target, replace: true });
-  };
-
-  const handleSetup = async (e: FormEvent) => {
-    e.preventDefault();
-    setError("");
-    if (password.length < 8) {
-      setError("Choose a passcode of at least 8 characters.");
-      return;
-    }
-    setLoading(true);
-    const { error: signUpErr } = await supabase.auth.signUp({
-      email: email.trim(),
-      password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/login`,
-        data: { name: name.trim() },
-      },
-    });
-    setLoading(false);
-    if (signUpErr) {
-      setError(signUpErr.message);
-      return;
-    }
-    playClick();
-    setSentTo(email.trim());
   };
 
   return (
@@ -243,130 +314,77 @@ function LoginPage() {
       )}
 
       <div className="glass-card p-6 sm:p-8">
-        <div className="mb-6 flex rounded-xl bg-muted p-1">
-          {(["signin", "setup"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => {
-                setMode(m);
-                setError("");
-                setSentTo(null);
-              }}
-              className={cn(
-                "flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition",
-                mode === m ? "bg-card text-umbra shadow-sm" : "text-sage hover:text-umbra",
-              )}
-            >
-              {m === "signin" ? "Log in" : "Sign up"}
-            </button>
-          ))}
-        </div>
-
-        {sentTo ? (
-          <div className="space-y-3 py-4 text-center">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-success-soft text-success-strong">
-              <ShieldCheck className="h-6 w-6" />
-            </div>
-            <h2 className="text-base font-semibold text-umbra">Verify your corporate email</h2>
+        <form onSubmit={handleSignIn} className="space-y-4">
+          <div>
+            <h2 className="text-xl font-semibold text-umbra">Enclave Access</h2>
             <p className="text-sm text-sage">
-              We sent a verification link to <strong className="text-umbra">{sentTo}</strong>. Open
-              it to activate your enclave access, then sign in with your new passcode.
+              Enter your corporate credentials to access your designated enclave.
             </p>
           </div>
-        ) : (
-          <form onSubmit={mode === "signin" ? handleSignIn : handleSetup} className="space-y-4">
-            <div>
-              <h2 className="text-xl font-semibold text-umbra">
-                {mode === "signin" ? "Welcome back" : "Create your account"}
-              </h2>
-              <p className="text-sm text-sage">
-                {mode === "signin"
-                  ? "Enter your corporate credentials to access your designated enclave."
-                  : "Existing personnel: use your corporate email — your profile and history are linked once you verify it."}
-              </p>
+
+          {error && (
+            <div className="rounded-lg border border-destructive/30 bg-destructive-soft p-3 text-sm text-destructive">
+              {error}
             </div>
+          )}
 
-            {error && (
-              <div className="rounded-lg border border-destructive/30 bg-destructive-soft p-3 text-sm text-destructive">
-                {error}
-              </div>
-            )}
-
-            {mode === "setup" && (
-              <div>
-                <label htmlFor="name" className="mb-1.5 block text-sm font-medium text-umbra">
-                  Full name
-                </label>
-                <input
-                  id="name"
-                  required
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Alex Rivera"
-                  className="glass-input w-full"
-                  disabled={loading}
-                  maxLength={100}
-                />
-              </div>
-            )}
-            <div>
-              <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-umbra">
-                Corporate email
+          <div>
+            <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-umbra">
+              Corporate email
+            </label>
+            <input
+              id="email"
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="alex.rivera@presencetrack.corp"
+              className="glass-input w-full"
+              disabled={loading}
+            />
+          </div>
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <label htmlFor="password" className="block text-sm font-medium text-umbra">
+                Passcode
               </label>
+              <Link to="/recovery" className="text-xs text-sage underline hover:text-umbra">
+                Forgot passcode?
+              </Link>
+            </div>
+            <div className="relative">
               <input
-                id="email"
-                type="email"
+                id="password"
+                type={showPassword ? "text" : "password"}
                 required
-                autoComplete="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="alex.rivera@presencetrack.corp"
-                className="glass-input w-full"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="glass-input w-full pr-10"
                 disabled={loading}
               />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                aria-label={showPassword ? "Hide passcode" : "Show passcode"}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-sage hover:text-umbra transition"
+              >
+                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
             </div>
-            <div>
-              <div className="mb-1.5 flex items-center justify-between">
-                <label htmlFor="password" className="block text-sm font-medium text-umbra">
-                  {mode === "signin" ? "Passcode" : "Choose a passcode"}
-                </label>
-                {mode === "signin" && (
-                  <Link to="/recovery" className="text-xs text-sage underline hover:text-umbra">
-                    Forgot passcode?
-                  </Link>
-                )}
-              </div>
-              <div className="relative">
-                <input
-                  id="password"
-                  type={showPassword ? "text" : "password"}
-                  required
-                  autoComplete={mode === "signin" ? "current-password" : "new-password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="glass-input w-full pr-10"
-                  disabled={loading}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  aria-label={showPassword ? "Hide passcode" : "Show passcode"}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-sage hover:text-umbra transition"
-                >
-                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-            </div>
-            <button type="submit" disabled={loading} className="glass-btn-primary w-full py-3">
-              {loading
-                ? "Authenticating…"
-                : mode === "signin"
-                  ? "Authenticate and enter enclave"
-                  : "Send verification link"}
-            </button>
-          </form>
-        )}
+          </div>
+          <button type="submit" disabled={loading} className="glass-btn-primary w-full py-3">
+            {loading ? "Authenticating…" : "Authenticate and enter enclave"}
+          </button>
+        </form>
+
+        <div className="mt-6 border-t border-border/40 pt-4">
+          <p className="text-xs text-sage leading-relaxed text-center">
+            New to PresenceTrack? Personnel onboarding is strictly by corporate invitation. Check
+            your mailbox for your activation link or contact HR Operations.
+          </p>
+        </div>
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">

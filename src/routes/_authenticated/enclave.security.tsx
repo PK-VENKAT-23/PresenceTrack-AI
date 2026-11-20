@@ -7,7 +7,7 @@ import { canAccessEnclave, enclavePathFor } from "@/lib/enclaves";
 import { liveTelemetryQuery, nodesQuery, recentTransitsQuery } from "@/lib/queries";
 import { useRealtimeRefresh } from "@/hooks/use-realtime";
 import { Esp32StreamGrid } from "@/components/presence/security/Esp32StreamGrid";
-import { Esp32CanvasOverlay } from "@/components/presence/security/Esp32CanvasOverlay";
+import { Esp32CanvasOverlay, GATEWAY_VIDEO_FEED_URL } from "@/components/presence/security/Esp32CanvasOverlay";
 import { CameraConfigModal } from "@/components/presence/security/CameraConfigModal";
 import { LiveTransitFeed } from "@/components/presence/security/LiveTransitFeed";
 import { UnknownDetectionsList } from "@/components/presence/security/UnknownDetectionsList";
@@ -55,7 +55,21 @@ function SecurityEnclave() {
   useRealtimeRefresh("passive_transits", [["transits", "recent"]], { onInsert: playTransitBlip });
   useRealtimeRefresh("unknown_detections", [["unknown_detections"]]);
 
-  const online = nodes.filter((n) => isNodeLive(n)).length;
+  const online = nodes.filter((n) => n.id === "ESP32-CAM-01-NORTH" && isNodeLive(n)).length;
+  const activeNode =
+    nodes.find((n) => n.id === "ESP32-CAM-01-NORTH" && isNodeLive(n)) ??
+    nodes.find((n) => isNodeLive(n)) ??
+    nodes.find((n) => n.id === "ESP32-CAM-01-NORTH") ??
+    nodes[0] ??
+    null;
+  const isNodeAttested = Boolean(
+    activeNode && activeNode.id === "ESP32-CAM-01-NORTH" && isNodeLive(activeNode),
+  );
+  const isTelemetryTimeStale = telemetry?.updated_at
+    ? Date.now() - new Date(telemetry.updated_at).getTime() > 4000
+    : false;
+  const isStale = Boolean(telemetry?.is_stale) || isTelemetryTimeStale;
+  const isCameraLive = Boolean(isNodeAttested && !isStale);
   const feed = useMemo(
     () =>
       transits
@@ -87,7 +101,12 @@ function SecurityEnclave() {
       </div>
 
       <div className="glass-card">
-        <Esp32StreamGrid nodes={nodes} />
+        <Esp32StreamGrid
+          nodes={nodes}
+          isLive={isCameraLive}
+          isStale={isStale}
+          recoveryStatus={telemetry?.recovery_status}
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
@@ -99,25 +118,30 @@ function SecurityEnclave() {
             </span>
           </div>
           <Esp32CanvasOverlay
-            isLive={online > 0 || (telemetry?.is_live ?? false)}
-            faceDetected={telemetry?.face_detected ?? false}
-            faceBoundingBox={telemetry?.face_bounding_box ?? null}
-            scScore={telemetry?.sc_score ?? 0}
+            isLive={isCameraLive}
+            isStale={isStale}
+            recoveryStatus={telemetry?.recovery_status}
+            streamUrl={isNodeAttested ? GATEWAY_VIDEO_FEED_URL : null}
+            faceDetected={!isStale && (telemetry?.face_detected ?? false)}
+            faceBoundingBox={isStale ? null : (telemetry?.face_bounding_box ?? null)}
+            scScore={isStale ? 0 : (telemetry?.sc_score ?? 0)}
             statusMessage={
-              telemetry?.face_detected && telemetry.matched_name
-                ? `Optical match: ${telemetry.matched_name}`
-                : online > 0 || telemetry?.is_live
-                  ? "Perimeter Active · Standby for transits"
-                  : "No edge camera nodes online"
+              !isCameraLive
+                ? isStale
+                  ? "Stream stale · Awaiting fresh camera frames…"
+                  : "Camera node offline · Stream interrupted"
+                : !isStale && telemetry?.face_detected && telemetry.matched_name
+                  ? `Optical match: ${telemetry.matched_name}`
+                  : "Perimeter Active · Standby for transits"
             }
           />
           <div className="mt-2 flex justify-between text-xs text-sage">
             <span
               className={
-                online > 0 || telemetry?.is_live ? "text-success-strong" : "text-warning-strong"
+                isCameraLive ? "text-success-strong" : "text-warning-strong"
               }
             >
-              {online > 0 || telemetry?.is_live
+              {isCameraLive
                 ? "Sensor stream connected"
                 : "Awaiting hardware node heartbeat"}
             </span>

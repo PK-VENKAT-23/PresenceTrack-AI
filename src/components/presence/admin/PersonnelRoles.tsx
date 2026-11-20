@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { UserPlus, Building2, Edit2, ShieldAlert } from "lucide-react";
+import { UserPlus, Building2, Edit2, ShieldAlert, Camera, Fingerprint } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { ROLE_LABELS, type EnterpriseUser, type UserRole } from "@/lib/ambient";
 import { cn } from "@/lib/utils";
-import { assignEmployeeRole } from "@/lib/employee.functions";
+import { assignEmployeeRole, getEmployeeBiometricStatus } from "@/lib/employee.functions";
 import { InviteEmployeeModal } from "./InviteEmployeeModal";
 import { EmployeeEditModal } from "./EmployeeEditModal";
 import { DepartmentManagerModal } from "./DepartmentManagerModal";
+import { FaceEnrollmentModal } from "./FaceEnrollmentModal";
 
 const ROLES: UserRole[] = ["employee", "hr_ops", "security", "super_admin"];
 
@@ -21,12 +23,36 @@ interface PersonnelRolesProps {
 
 /** Super Admin assigns each person to exactly one enclave & manages employee records. */
 export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: PersonnelRolesProps) {
+  const queryClient = useQueryClient();
   const assignRoleServerFn = useServerFn(assignEmployeeRole);
+  const getBiometricStatusFn = useServerFn(getEmployeeBiometricStatus);
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState<string | null>(null);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showDeptModal, setShowDeptModal] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<EnterpriseUser | null>(null);
+  const [enrollingEmployee, setEnrollingEmployee] = useState<EnterpriseUser | null>(null);
+
+  // Live Biometric Statuses for all personnel
+  const { data: biometricStatuses, refetch: refetchBiometrics } = useQuery({
+    queryKey: ["biometric-statuses"],
+    queryFn: async () => {
+      try {
+        const res = await getBiometricStatusFn({ data: {} });
+        return res.statuses ?? {};
+      } catch (err) {
+        console.error("Failed to fetch biometric statuses:", err);
+        return {};
+      }
+    },
+  });
+
+  const handleRefresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["biometric-statuses"] });
+    await queryClient.invalidateQueries({ queryKey: ["personnel"] });
+    await refetchBiometrics();
+    onChanged();
+  };
 
   const q = search.toLowerCase();
   const filtered = people.filter(
@@ -62,17 +88,8 @@ export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: Personn
         toast.success(`Enclave updated to ${ROLE_LABELS[role]}`);
         onChanged();
       }
-    } catch {
-      const { error } = await supabase
-        .from("user_roles")
-        .upsert({ user_id: authId, role }, { onConflict: "user_id" });
-
-      if (error) {
-        toast.error(error.message);
-      } else {
-        toast.success(`Enclave updated to ${ROLE_LABELS[role]}`);
-        onChanged();
-      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update role clearance");
     } finally {
       setSaving(null);
     }
@@ -120,7 +137,8 @@ export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: Personn
               <th>Personnel</th>
               <th>Badge ID</th>
               <th>Department</th>
-              <th>Status</th>
+              <th>Account</th>
+              <th>Biometric Status</th>
               <th>Enclave Clearance</th>
               <th>Actions</th>
             </tr>
@@ -128,7 +146,7 @@ export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: Personn
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={6} className="py-6 text-center text-sage">
+                <td colSpan={7} className="py-6 text-center text-sage">
                   No matching personnel found.
                 </td>
               </tr>
@@ -136,7 +154,12 @@ export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: Personn
               filtered.map((p) => {
                 const authId = p.auth_user_id;
                 const current = authId ? roles[authId] : undefined;
-                const isActive = p.is_active;
+                const bioStatus = biometricStatuses?.[p.id];
+                const isActive = bioStatus ? bioStatus.is_active : (p.is_active ?? true);
+                const consentRevoked = bioStatus ? bioStatus.consent_revoked : Boolean(p.consent_revoked);
+                const isEnrolled = bioStatus
+                  ? bioStatus.is_enrolled
+                  : (p.enrolled_embedding !== null && p.enrolled_embedding !== undefined);
 
                 return (
                   <tr key={p.id}>
@@ -169,7 +192,26 @@ export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: Personn
                         </span>
                       ) : (
                         <span className="pill bg-destructive-soft text-xxs font-semibold text-destructive">
-                          DEACTIVATED
+                          ACCOUNT DEACTIVATED
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {!isActive ? (
+                        <span className="pill bg-destructive-soft text-xxs font-semibold text-destructive">
+                          ACCOUNT DEACTIVATED
+                        </span>
+                      ) : consentRevoked ? (
+                        <span className="pill bg-destructive-soft text-xxs font-semibold text-destructive">
+                          CONSENT REVOKED
+                        </span>
+                      ) : isEnrolled ? (
+                        <span className="pill bg-success-soft text-xxs font-semibold text-success-strong">
+                          ENROLLED
+                        </span>
+                      ) : (
+                        <span className="pill bg-warning-soft text-xxs font-semibold text-warning-strong">
+                          NOT ENROLLED
                         </span>
                       )}
                     </td>
@@ -201,15 +243,58 @@ export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: Personn
                         </select>
                       )}
                     </td>
-                    <td>
-                      <button
-                        type="button"
-                        onClick={() => setEditingEmployee(p)}
-                        className="glass-btn flex items-center gap-1 py-1 px-2.5 text-xxs"
-                      >
-                        <Edit2 className="h-3 w-3" />
-                        Edit Profile
-                      </button>
+                    <td className="whitespace-nowrap">
+                      <div className="flex items-center gap-1.5">
+                        {!isActive ? (
+                          <button
+                            type="button"
+                            disabled
+                            className="glass-btn flex items-center gap-1 py-1 px-2.5 text-xxs opacity-50 cursor-not-allowed text-sage"
+                            title="Enrollment disabled: Employee account is deactivated"
+                          >
+                            <Camera className="h-3 w-3" />
+                            Register Face
+                          </button>
+                        ) : consentRevoked ? (
+                          <button
+                            type="button"
+                            onClick={() => setEnrollingEmployee(p)}
+                            className="glass-btn flex items-center gap-1 py-1 px-2.5 text-xxs text-warning-strong hover:bg-warning-soft/50 font-semibold"
+                            title={`Manage biometric consent for ${p.name}`}
+                          >
+                            <ShieldAlert className="h-3 w-3" />
+                            Manage Consent
+                          </button>
+                        ) : isEnrolled ? (
+                          <button
+                            type="button"
+                            onClick={() => setEnrollingEmployee(p)}
+                            className="glass-btn flex items-center gap-1 py-1 px-2.5 text-xxs text-penna hover:bg-muted/50 font-semibold"
+                            title={`Manage facial biometrics for ${p.name}`}
+                          >
+                            <Fingerprint className="h-3 w-3" />
+                            Manage Face
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setEnrollingEmployee(p)}
+                            className="glass-btn flex items-center gap-1 py-1 px-2.5 text-xxs text-success-strong hover:bg-success-soft/50 font-semibold"
+                            title={`Register facial biometrics for ${p.name}`}
+                          >
+                            <Camera className="h-3 w-3" />
+                            Register Face
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setEditingEmployee(p)}
+                          className="glass-btn flex items-center gap-1 py-1 px-2.5 text-xxs"
+                        >
+                          <Edit2 className="h-3 w-3" />
+                          Edit Profile
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -220,11 +305,11 @@ export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: Personn
       </div>
 
       {showInviteModal && (
-        <InviteEmployeeModal onClose={() => setShowInviteModal(false)} onSuccess={onChanged} />
+        <InviteEmployeeModal onClose={() => setShowInviteModal(false)} onSuccess={handleRefresh} />
       )}
 
       {showDeptModal && (
-        <DepartmentManagerModal onClose={() => setShowDeptModal(false)} onChanged={onChanged} />
+        <DepartmentManagerModal onClose={() => setShowDeptModal(false)} onChanged={handleRefresh} />
       )}
 
       {editingEmployee && (
@@ -232,7 +317,15 @@ export function PersonnelRoles({ people, roles, selfAuthId, onChanged }: Personn
           employee={editingEmployee}
           departments={departments}
           onClose={() => setEditingEmployee(null)}
-          onSuccess={onChanged}
+          onSuccess={handleRefresh}
+        />
+      )}
+
+      {enrollingEmployee && (
+        <FaceEnrollmentModal
+          employee={enrollingEmployee}
+          onClose={() => setEnrollingEmployee(null)}
+          onSuccess={handleRefresh}
         />
       )}
     </div>

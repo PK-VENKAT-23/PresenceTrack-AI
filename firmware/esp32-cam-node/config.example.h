@@ -16,8 +16,10 @@
 #define WIFI_PASSWORD     "YOUR_WIFI_PASSWORD"
 
 // ── 2. Backend & Node Identity ───────────────────────────────────────────────
-// Published web app URL (no trailing slash)
-#define BACKEND_HOST      "https://YOUR-APP.lovable.app"
+// Backend URL (no trailing slash)
+// For local network development: "http://<MAC_LAN_IP>:8080" (e.g. "http://192.168.1.8:8080")
+// For cloud deployment: "https://YOUR-APP.lovable.app"
+#define BACKEND_HOST      "http://192.168.1.8:8080"
 
 // Must match the ESP32_DEVICE_KEY secret configured in your backend environment
 #define DEVICE_KEY        "YOUR_ESP32_DEVICE_KEY"

@@ -20,19 +20,28 @@ dist-ssr
 !.env.example
 
 # Python & Virtualenv
+vision-gateway/.venv
 vision-gateway/.venv/
+.venv
 .venv/
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 
+# Supabase
+supabase/.temp/
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars
 
-# Hardware & Firmware Secrets
+# Hardware & Firmware Secrets & Build artifacts
 firmware/**/config.h
+.pio/
+*.bak
+*.backup_*
+*.before_*
 
 # Editor directories and files
 .vscode/*

@@ -2,9 +2,20 @@ import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { isNodeLive, type Esp32Node } from "@/lib/ambient";
 import { cn } from "@/lib/utils";
+import { GATEWAY_VIDEO_FEED_URL } from "./Esp32CanvasOverlay";
 
 /** Quadrant grid of ESP32-CAM boundary feeds. Streams are on the local network and open in a new tab. */
-export function Esp32StreamGrid({ nodes }: { nodes: Esp32Node[] }) {
+export function Esp32StreamGrid({
+  nodes,
+  isLive,
+  isStale = false,
+  recoveryStatus,
+}: {
+  nodes: Esp32Node[];
+  isLive?: boolean | undefined;
+  isStale?: boolean | undefined;
+  recoveryStatus?: string | null | undefined;
+}) {
   const [selected, setSelected] = useState<string | null>(null);
 
   if (nodes.length === 0) {
@@ -16,8 +27,45 @@ export function Esp32StreamGrid({ nodes }: { nodes: Esp32Node[] }) {
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
       {nodes.map((node, i) => {
-        const live = isNodeLive(node);
+        const isNorthCamera = node.id === "ESP32-CAM-01-NORTH";
+        const hasHeartbeat = isNodeLive(node);
+
+        type NodeStreamStatus =
+          | "LIVE"
+          | "CHECKING"
+          | "RECONNECTING"
+          | "STREAM STALE"
+          | "CAMERA OFFLINE"
+          | "GATEWAY OFFLINE"
+          | "RECOVERY FAILED"
+          | "NODE OFFLINE";
+        let status: NodeStreamStatus;
+
+        if (!isNorthCamera) {
+          // Reserved cameras remain offline per system specifications
+          status = "NODE OFFLINE";
+        } else if (recoveryStatus === "RECOVERY_FAILED") {
+          status = "RECOVERY FAILED";
+        } else if (recoveryStatus === "RECONNECTING") {
+          status = "RECONNECTING";
+        } else if (recoveryStatus === "GATEWAY_OFFLINE") {
+          status = "GATEWAY OFFLINE";
+        } else if (recoveryStatus === "CHECKING") {
+          status = "CHECKING";
+        } else if (!hasHeartbeat) {
+          status = "NODE OFFLINE";
+        } else if (isStale) {
+          status = "STREAM STALE";
+        } else if (isLive === false) {
+          status = "CAMERA OFFLINE";
+        } else {
+          status = "LIVE";
+        }
+
+        const isLiveFeed = status === "LIVE";
         const isSel = selected === node.id;
+        const isFailed = status === "RECOVERY FAILED" || status === "GATEWAY OFFLINE";
+        const isWarning = status === "STREAM STALE" || status === "RECONNECTING" || status === "CHECKING";
         return (
           <div key={node.id} className="group overflow-hidden rounded-xl border border-border">
             <button
@@ -28,22 +76,45 @@ export function Esp32StreamGrid({ nodes }: { nodes: Esp32Node[] }) {
               <div className="absolute inset-0 flex items-center justify-center text-center font-mono text-sm text-stage-foreground/30">
                 ESP32-CAM Node {i + 1}
                 <br />
-                {live ? "LIVE" : "OFFLINE"}
+                {status}
               </div>
-              {live && <div className="absolute inset-0 border-2 border-penna/30" />}
+              {isLiveFeed ? (
+                <img
+                  src={GATEWAY_VIDEO_FEED_URL}
+                  alt={node.boundary_name || node.id}
+                  className="absolute inset-0 h-full w-full object-cover"
+                  loading="lazy"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.display = "none";
+                  }}
+                />
+              ) : null}
+              {isLiveFeed && <div className="absolute inset-0 border-2 border-penna/30 pointer-events-none" />}
               <div
                 className={cn(
-                  "absolute top-2 left-2 flex items-center gap-1.5 text-xs font-medium",
-                  live ? "text-success" : "text-warning",
+                  "absolute top-2 left-2 flex items-center gap-1.5 text-xs font-medium font-mono",
+                  isLiveFeed
+                    ? "text-success"
+                    : isFailed
+                      ? "text-destructive"
+                      : isWarning
+                        ? "text-warning"
+                        : "text-sage",
                 )}
               >
                 <span
                   className={cn(
                     "h-2 w-2 rounded-full",
-                    live ? "animate-pulse bg-success" : "bg-warning",
+                    isLiveFeed
+                      ? "animate-pulse bg-success"
+                      : isFailed
+                        ? "bg-destructive"
+                        : isWarning
+                          ? "animate-pulse bg-warning"
+                          : "bg-sage",
                   )}
                 />
-                {live ? "LIVE" : "OFFLINE"}
+                {status}
               </div>
               <div className="absolute right-2 bottom-2 left-2 truncate rounded bg-stage/80 px-2 py-1 text-xs text-stage-foreground">
                 {node.id} — {node.boundary_name}
@@ -69,18 +140,25 @@ export function Esp32StreamGrid({ nodes }: { nodes: Esp32Node[] }) {
                       : "never"}
                   </span>
                 </div>
-                <a
-                  href={node.stream_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="block truncate font-mono text-success-strong underline"
-                >
-                  {node.stream_url}
-                </a>
-                <p className="text-xxs text-sage">
-                  The MJPEG feed is served on the office network and opens from a device on that
-                  network.
-                </p>
+                {isNorthCamera ? (
+                  <>
+                    <a
+                      href={GATEWAY_VIDEO_FEED_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block truncate font-mono text-success-strong underline"
+                    >
+                      Gateway Stream Relay ({GATEWAY_VIDEO_FEED_URL})
+                    </a>
+                    <p className="text-xxs text-sage">
+                      Direct hardware access (:81/stream) is reserved for the Vision Gateway relay to prevent single-client hardware contention.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xxs text-sage font-mono">
+                    Reserved camera node slot. Optical matrix standby.
+                  </p>
+                )}
               </div>
             )}
           </div>

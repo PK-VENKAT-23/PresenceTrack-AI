@@ -3,7 +3,7 @@ import { ShieldAlert, UserX, Clock, Lock, ArrowLeft } from "lucide-react";
 import { AuthShell } from "@/components/presence/layout/AuthShell";
 
 type UnauthorizedSearch = {
-  reason?: "deactivated" | "forbidden" | "expired" | "role_mismatch";
+  reason?: "deactivated" | "forbidden" | "expired" | "role_mismatch" | "no_role" | "quarantined";
 };
 
 export const Route = createFileRoute("/unauthorized")({
@@ -13,7 +13,9 @@ export const Route = createFileRoute("/unauthorized")({
       reason === "deactivated" ||
       reason === "forbidden" ||
       reason === "expired" ||
-      reason === "role_mismatch"
+      reason === "role_mismatch" ||
+      reason === "no_role" ||
+      reason === "quarantined"
     ) {
       return { reason };
     }
@@ -37,6 +39,17 @@ function UnauthorizedPage() {
 
   const getReasonConfig = () => {
     switch (reason) {
+      case "quarantined":
+        return {
+          icon: ShieldAlert,
+          iconColor: "text-amber-500",
+          iconBg: "bg-amber-500/10",
+          title: "Account Under Security Quarantine",
+          description:
+            "Your profile is under security quarantine (RECONCILIATION_REQUIRED) due to an onboarding anomaly, email mismatch, or role reconciliation requirement. All enclave clearances are suspended in accordance with zero-trust access control.",
+          guidance:
+            "Please contact your Super Admin or HR Operations to review and reconcile your profile linkage.",
+        };
       case "deactivated":
         return {
           icon: UserX,
@@ -67,6 +80,17 @@ function UnauthorizedPage() {
           description:
             "Strict Enclave Isolation is active. Each personnel role has access to exactly one designated console and cross-role navigation is prevented.",
           guidance: "Return to your assigned enclave to view authorized workplace analytics.",
+        };
+      case "no_role":
+        return {
+          icon: UserX,
+          iconColor: "text-amber-500",
+          iconBg: "bg-amber-500/10",
+          title: "Role Assignment Required",
+          description:
+            "Your account is verified, but no active role has been assigned to your profile in public.user_roles. In accordance with zero-trust access control, enclave access is restricted.",
+          guidance:
+            "Please contact your Super Admin or HR Operations to finalize your personnel role assignment.",
         };
       case "forbidden":
       default:

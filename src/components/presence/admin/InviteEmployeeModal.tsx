@@ -11,7 +11,7 @@ interface InviteEmployeeModalProps {
   onSuccess: () => void;
 }
 
-const ROLES: UserRole[] = ["employee", "hr_ops", "security", "super_admin"];
+const ROLES: UserRole[] = ["employee", "hr_ops", "security"];
 
 export function InviteEmployeeModal({ onClose, onSuccess }: InviteEmployeeModalProps) {
   const invite = useServerFn(inviteEmployee);

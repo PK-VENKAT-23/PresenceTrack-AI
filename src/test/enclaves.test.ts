@@ -19,9 +19,17 @@ describe("strict enclave isolation", () => {
     expect(canAccessEnclave("super_admin", "admin")).toBe(true);
   });
 
-  it("treats people without a role as employees", () => {
-    expect(enclavePathFor(null)).toBe("/enclave/employee");
+  it("strictly denies access to any enclave for null or undefined roles", () => {
+    expect(enclavePathFor(null)).toBe("/unauthorized");
+    expect(enclavePathFor(undefined)).toBe("/unauthorized");
+    expect(canAccessEnclave(null, "employee")).toBe(false);
+    expect(canAccessEnclave(null, "hr")).toBe(false);
+    expect(canAccessEnclave(null, "security")).toBe(false);
     expect(canAccessEnclave(null, "admin")).toBe(false);
+    expect(canAccessEnclave(undefined, "employee")).toBe(false);
+    expect(canAccessEnclave(undefined, "hr")).toBe(false);
+    expect(canAccessEnclave(undefined, "security")).toBe(false);
+    expect(canAccessEnclave(undefined, "admin")).toBe(false);
   });
 });
 

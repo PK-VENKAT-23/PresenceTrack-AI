@@ -16,6 +16,7 @@ import { PersonalTransitLog } from "@/components/presence/employee/PersonalTrans
 import { ConsentVault } from "@/components/presence/employee/ConsentVault";
 import { ManualPunchCard } from "@/components/presence/employee/ManualPunchCard";
 import { MonthlyAttendanceCalendar } from "@/components/presence/employee/MonthlyAttendanceCalendar";
+import { EmployeeGrievancesSection } from "@/components/presence/employee/EmployeeGrievancesSection";
 import { UnlinkedProfile } from "@/components/presence/layout/UnlinkedProfile";
 import { playTransitBlip } from "@/lib/sound-engine";
 import { cn } from "@/lib/utils";
@@ -42,7 +43,7 @@ export const Route = createFileRoute("/_authenticated/enclave/employee")({
       throw redirect({ to: enclavePathFor(context.role) });
   },
   loader: async ({ context }) => {
-    if (!context.profile) return;
+    if (!context.role || !context.profile?.id) return;
     const id = context.profile.id;
     await Promise.all([
       context.queryClient.ensureQueryData(myDwellQuery(id)),
@@ -54,9 +55,9 @@ export const Route = createFileRoute("/_authenticated/enclave/employee")({
 });
 
 function EmployeeEnclave() {
-  const { profile } = useRouteContext({ from: "/_authenticated" });
-  if (!profile) return <UnlinkedProfile />;
-  return <EmployeeConsole profile={profile} />;
+  const { role, profile } = useRouteContext({ from: "/_authenticated" });
+  if (!role || !profile) return <UnlinkedProfile />;
+  return <EmployeeConsole profile={profile as EnterpriseUser} />;
 }
 
 function greeting() {
@@ -133,6 +134,22 @@ function EmployeeConsole({ profile }: { profile: EnterpriseUser }) {
                   : "NOT DETECTED"}
               </span>
             </div>
+            <div className="flex items-center gap-2 rounded-full border border-border bg-stage/80 px-3 py-1.5">
+              <span
+                className={cn(
+                  "h-2 w-2 rounded-full",
+                  inside && !profile.consent_revoked ? "animate-pulse bg-success" : "bg-warning",
+                )}
+              />
+              <span className="text-xs font-semibold text-penna">ATTENTION:</span>
+              <span className="text-xs text-sage font-mono">
+                {profile.consent_revoked
+                  ? "PAUSED (REVOKED)"
+                  : inside
+                    ? "DESK ACTIVE"
+                    : "AWAY / BREAK"}
+              </span>
+            </div>
             <ConsentVault profile={profile} requests={requests} />
           </div>
         </div>
@@ -195,6 +212,8 @@ function EmployeeConsole({ profile }: { profile: EnterpriseUser }) {
       </div>
 
       <MonthlyAttendanceCalendar employeeId={profile.id} />
+
+      <EmployeeGrievancesSection employeeId={profile.id} />
 
       <div className="glass-card">
         <h3 className="mb-3 text-sm font-semibold text-umbra">

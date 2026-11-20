@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import React from "react";
 import { Esp32CanvasOverlay } from "@/components/presence/security/Esp32CanvasOverlay";
+import { Esp32StreamGrid } from "@/components/presence/security/Esp32StreamGrid";
 import { Route as TelemetryRoute } from "@/routes/api/public/esp32/telemetry";
 import { Route as BoundaryTransitRoute } from "@/routes/api/public/esp32/boundary-transit";
+import { Route as EnrolledTemplatesRoute } from "@/routes/api/public/esp32/enrolled-templates";
 
 vi.mock("@/integrations/supabase/client.server", () => ({
   hasSupabaseAdminConfigured: () => true,
@@ -35,36 +37,60 @@ vi.mock("@/integrations/supabase/client.server", () => ({
       }
       return Promise.resolve({ data: false, error: null });
     }),
-    from: vi.fn((table: string) => ({
-      insert: vi.fn().mockResolvedValue({ data: { id: "test-id" }, error: null }),
-      select: vi.fn().mockReturnValue({
+    from: vi.fn((table: string) => {
+      const qb: any = {
         eq: vi.fn().mockReturnThis(),
         gte: vi.fn().mockReturnThis(),
         limit: vi.fn().mockReturnThis(),
+        not: vi.fn().mockImplementation(() =>
+          Promise.resolve({
+            data: [
+              {
+                id: "a0000000-0000-0000-0000-000000000001",
+                name: "Priya Sharma",
+                badge_id: "EMP-101",
+                enrolled_embedding: {
+                  encrypted: true,
+                  payload: "mock-encrypted-template-payload",
+                  iv: "mock-iv-base64",
+                },
+                consent_revoked: false,
+                is_active: true,
+              },
+            ],
+            error: null,
+          }),
+        ),
         maybeSingle: vi.fn().mockResolvedValue({
           data: {
             id: "a0000000-0000-0000-0000-000000000001",
+            name: "Priya Sharma",
             consent_revoked: false,
             is_active: true,
           },
           error: null,
         }),
-      }),
-    })),
+      };
+      return {
+        insert: vi.fn().mockResolvedValue({ data: { id: "test-id" }, error: null }),
+        select: vi.fn().mockReturnValue(qb),
+      };
+    }),
   },
 }));
 
-type RouteHandler = (args?: { request: Request }) => Promise<Response>;
+type RouteHandler = (args: { request: Request }) => Promise<Response>;
 
 function getServerHandler(
-  route: { options: { server?: { handlers?: Record<string, unknown> } } },
+  route: any,
   method: string,
-): RouteHandler | undefined {
-  return route.options.server?.handlers?.[method] as RouteHandler | undefined;
+): RouteHandler {
+  return route.options?.server?.handlers?.[method] as RouteHandler;
 }
 
 beforeEach(() => {
   HTMLCanvasElement.prototype.getContext = vi.fn().mockReturnValue({
+    clearRect: vi.fn(),
     fillRect: vi.fn(),
     fillText: vi.fn(),
     beginPath: vi.fn(),
@@ -121,6 +147,169 @@ describe("Phase 5: Vision Gateway & Security Telemetry Integration", () => {
       );
       expect(screen.getByText("Awaiting boundary transit")).toBeDefined();
       expect(screen.queryByText("Identity Verified")).toBeNull();
+    });
+
+    it("routes direct ESP32 streamUrl to gateway video relay URL", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          streamUrl="http://192.168.1.18:81/stream"
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+        />,
+      );
+      const img = screen.getByAltText("ESP32-CAM live stream") as HTMLImageElement;
+      expect(img).toBeDefined();
+      expect(img.src).toBe("http://localhost:8001/video_feed");
+      expect(screen.getByText("CONNECTING…")).toBeDefined();
+    });
+
+    it("renders gateway video relay URL directly when provided", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          streamUrl="http://localhost:8001/video_feed"
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+        />,
+      );
+      const img = screen.getByAltText("ESP32-CAM live stream") as HTMLImageElement;
+      expect(img).toBeDefined();
+      expect(img.src).toBe("http://localhost:8001/video_feed");
+      expect(screen.getByText("CONNECTING…")).toBeDefined();
+    });
+
+    it("detects decoded video frames and switches status to LIVE STREAM", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          streamUrl="http://localhost:8001/video_feed"
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+        />,
+      );
+      const img = screen.getByAltText("ESP32-CAM live stream") as HTMLImageElement;
+      // Simulate frame arrival by setting natural dimensions
+      Object.defineProperty(img, "naturalWidth", { value: 320, configurable: true });
+      Object.defineProperty(img, "naturalHeight", { value: 240, configurable: true });
+      act(() => {
+        fireEvent.load(img);
+      });
+      expect(screen.getByText("LIVE STREAM")).toBeDefined();
+    });
+
+    it("displays STREAM ERROR when gateway relay connection fails and supports reconnect", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          streamUrl="http://localhost:8001/video_feed"
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+        />,
+      );
+      const img = screen.getByAltText("ESP32-CAM live stream");
+      act(() => {
+        fireEvent.error(img);
+      });
+      expect(screen.getByText("STREAM ERROR")).toBeDefined();
+      const reconnectBtn = screen.getByText("↻ Reconnect Stream");
+      expect(reconnectBtn).toBeDefined();
+      act(() => {
+        fireEvent.click(reconnectBtn);
+      });
+      expect(screen.getByText("CONNECTING…")).toBeDefined();
+    });
+
+    it("displays STREAM STALE badge when isStale is true and hides video stream opacity", () => {
+      const { rerender } = render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          isStale={true}
+          streamUrl="http://localhost:8001/video_feed"
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+        />,
+      );
+      expect(screen.getByText("STREAM STALE")).toBeDefined();
+
+      // Recovers when isStale returns to false
+      rerender(
+        <Esp32CanvasOverlay
+          isLive={true}
+          isStale={false}
+          streamUrl="http://localhost:8001/video_feed"
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+        />,
+      );
+      const img = screen.getByAltText("ESP32-CAM live stream");
+      act(() => {
+        fireEvent.load(img);
+      });
+      expect(screen.getByText("LIVE STREAM")).toBeDefined();
+    });
+
+    it("Esp32StreamGrid distinguishes LIVE vs STREAM STALE vs CAMERA OFFLINE vs NODE OFFLINE", () => {
+      const now = new Date().toISOString();
+      const nodes: any[] = [
+        {
+          id: "ESP32-CAM-01-NORTH",
+          boundary_name: "North Entrance",
+          is_online: true,
+          last_ping: now,
+          fps: 15,
+        },
+        {
+          id: "ESP32-CAM-02-SOUTH",
+          boundary_name: "South Exit",
+          is_online: true,
+          last_ping: now,
+          fps: 15,
+        },
+        {
+          id: "ESP32-CAM-03-EAST",
+          boundary_name: "East Corridor",
+          is_online: false,
+          last_ping: null,
+          fps: 15,
+        },
+        {
+          id: "ESP32-CAM-04-WEST",
+          boundary_name: "West Terrace",
+          is_online: false,
+          last_ping: null,
+          fps: 15,
+        },
+      ];
+
+      // 1. When isLive=true, isStale=false: North is LIVE, reserved nodes are NODE OFFLINE
+      const { rerender } = render(
+        <Esp32StreamGrid nodes={nodes} isLive={true} isStale={false} />,
+      );
+      expect(screen.getByText("LIVE")).toBeDefined();
+      expect(screen.getAllByText("NODE OFFLINE").length).toBe(3);
+
+      // 2. When isStale=true: North transitions to STREAM STALE
+      rerender(<Esp32StreamGrid nodes={nodes} isLive={true} isStale={true} />);
+      expect(screen.getByText("STREAM STALE")).toBeDefined();
+
+      // 3. When isLive=false: North transitions to CAMERA OFFLINE
+      rerender(<Esp32StreamGrid nodes={nodes} isLive={false} isStale={false} />);
+      expect(screen.getByText("CAMERA OFFLINE")).toBeDefined();
+
+      // 4. When North node has no recent heartbeat: North transitions to NODE OFFLINE
+      const nodesWithoutPing = [
+        { ...nodes[0], last_ping: new Date(Date.now() - 120000).toISOString() },
+        ...nodes.slice(1),
+      ];
+      rerender(<Esp32StreamGrid nodes={nodesWithoutPing} isLive={true} isStale={false} />);
+      expect(screen.getAllByText("NODE OFFLINE").length).toBe(4);
     });
   });
 
@@ -329,6 +518,82 @@ describe("Phase 5: Vision Gateway & Security Telemetry Integration", () => {
       expect(getJson.telemetry.matched_name).toBe("Rahul Roy");
       expect(getJson.telemetry.face_bounding_box).toEqual({ x: 120, y: 75, w: 85, h: 85 });
     });
+
+    it("Task 4 Discrepancy: POST telemetry strips identity for score in [0.363, 0.70) (0.55)", async () => {
+      const postHandler = getServerHandler(TelemetryRoute, "POST");
+      const getHandler = getServerHandler(TelemetryRoute, "GET");
+
+      const response = await postHandler!({
+        request: new Request("http://localhost:3000/api/public/esp32/telemetry", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-device-key": "test-device-secret-key-32",
+          },
+          body: JSON.stringify({
+            camera_id: "ESP32-CAM-01-NORTH",
+            is_live: true,
+            face_detected: true,
+            face_bounding_box: { x: 50, y: 50, w: 100, h: 100 },
+            sc_score: 0.55,
+            matched_person_id: "a0000000-0000-0000-0000-000000000001",
+            matched_name: "Priya Sharma",
+            timestamp: new Date().toISOString(),
+          }),
+        }),
+      });
+      expect(response.status).toBe(200);
+
+      // Verify sanitized state via Security GET: identity is stripped and category is UNCERTAIN
+      const getRes = await getHandler!({
+        request: new Request("http://localhost:3000/api/public/esp32/telemetry", {
+          headers: { authorization: "Bearer valid-security-token" },
+        }),
+      });
+      const data = await getRes.json();
+      expect(data.telemetry.sc_score).toBe(0.55);
+      expect(data.telemetry.confidence_category).toBe("UNCERTAIN");
+      expect(data.telemetry.matched_person_id).toBeNull();
+      expect(data.telemetry.matched_name).toBeNull();
+    });
+
+    it("Task 4 Discrepancy: POST telemetry verifies canonical identity when score >= 0.70", async () => {
+      const postHandler = getServerHandler(TelemetryRoute, "POST");
+      const getHandler = getServerHandler(TelemetryRoute, "GET");
+
+      const response = await postHandler!({
+        request: new Request("http://localhost:3000/api/public/esp32/telemetry", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-device-key": "test-device-secret-key-32",
+          },
+          body: JSON.stringify({
+            camera_id: "ESP32-CAM-01-NORTH",
+            is_live: true,
+            face_detected: true,
+            face_bounding_box: { x: 50, y: 50, w: 100, h: 100 },
+            sc_score: 0.76,
+            matched_person_id: "a0000000-0000-0000-0000-000000000001",
+            matched_name: "Spoofed Name Attempt",
+            timestamp: new Date().toISOString(),
+          }),
+        }),
+      });
+      expect(response.status).toBe(200);
+
+      const getRes = await getHandler!({
+        request: new Request("http://localhost:3000/api/public/esp32/telemetry", {
+          headers: { authorization: "Bearer valid-security-token" },
+        }),
+      });
+      const data = await getRes.json();
+      expect(data.telemetry.sc_score).toBe(0.76);
+      expect(data.telemetry.confidence_category).toBe("MATCHED");
+      expect(data.telemetry.matched_person_id).toBe("a0000000-0000-0000-0000-000000000001");
+      // Must use canonical name from DB ("Priya Sharma"), not spoofed name
+      expect(data.telemetry.matched_name).toBe("Priya Sharma");
+    });
   });
 
   describe("Boundary Transit Gate & Low Confidence Alerting", () => {
@@ -377,6 +642,75 @@ describe("Phase 5: Vision Gateway & Security Telemetry Integration", () => {
       expect(json.success).toBe(false);
       expect(json.unknown_alert_logged).toBe(true);
       expect(json.error).toContain("0.7000");
+    });
+
+    it("Task 4 Discrepancy: POST boundary-transit rejects genuine SFace score 0.58 even for valid employee because 0.58 < 0.70 (422 status)", async () => {
+      const postHandler = getServerHandler(BoundaryTransitRoute, "POST");
+      const request = new Request("http://localhost:3000/api/public/esp32/boundary-transit", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-device-key": "test-device-secret-key-32",
+        },
+        body: JSON.stringify({
+          camera_id: "ESP32-CAM-01-NORTH",
+          user_id: "a0000000-0000-0000-0000-000000000001",
+          zone_from: "CORRIDOR_TRANSIT",
+          zone_to: "WORKSPACE_FLOOR",
+          direction: "ZONE_ENTER",
+          cosine_score: 0.58,
+          dram_scrub_ms: 1.0,
+        }),
+      });
+
+      const response = await postHandler!({ request });
+      expect(response.status).toBe(422);
+      const json = await response.json();
+      expect(json.success).toBe(false);
+      expect(json.unknown_alert_logged).toBe(true);
+      expect(json.error).toContain("0.7000");
+    });
+  });
+
+  describe("Enrolled Templates Distribution (/api/public/esp32/enrolled-templates)", () => {
+    it("GET rejects requests without x-device-key (401)", async () => {
+      const getHandler = getServerHandler(EnrolledTemplatesRoute, "GET");
+      const request = new Request("http://localhost:3000/api/public/esp32/enrolled-templates");
+      const response = await getHandler({ request });
+      expect(response.status).toBe(401);
+    });
+
+    it("GET rejects requests with invalid x-device-key (401)", async () => {
+      const getHandler = getServerHandler(EnrolledTemplatesRoute, "GET");
+      const request = new Request("http://localhost:3000/api/public/esp32/enrolled-templates", {
+        headers: { "x-device-key": "invalid-device-key" },
+      });
+      const response = await getHandler({ request });
+      expect(response.status).toBe(401);
+    });
+
+    it("GET returns encrypted template envelopes and excludes raw biometric vectors (200)", async () => {
+      const getHandler = getServerHandler(EnrolledTemplatesRoute, "GET");
+      const request = new Request("http://localhost:3000/api/public/esp32/enrolled-templates", {
+        headers: { "x-device-key": "test-device-secret-key-32" },
+      });
+      const response = await getHandler({ request });
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      expect(data.success).toBe(true);
+      expect(data.count).toBe(1);
+      expect(Array.isArray(data.templates)).toBe(true);
+      expect(data.templates[0].employee_id).toBe("a0000000-0000-0000-0000-000000000001");
+      expect(data.templates[0].name).toBe("Priya Sharma");
+      expect(data.templates[0].badge_id).toBe("EMP-101");
+      // Template must be an encrypted envelope, never raw plaintext array
+      expect(data.templates[0].encrypted_envelope).toEqual({
+        encrypted: true,
+        payload: "mock-encrypted-template-payload",
+        iv: "mock-iv-base64",
+      });
+      expect(data.templates[0]).not.toHaveProperty("raw_embedding");
+      expect(data.templates[0]).not.toHaveProperty("embedding");
     });
   });
 });

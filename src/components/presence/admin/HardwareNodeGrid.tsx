@@ -8,7 +8,8 @@ export function HardwareNodeGrid({ nodes }: { nodes: Esp32Node[] }) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       {nodes.map((node) => {
-        const live = isNodeLive(node);
+        const isNorthCamera = node.id === "ESP32-CAM-01-NORTH";
+        const live = isNorthCamera ? isNodeLive(node) : false;
         return (
           <div key={node.id} className="rounded-xl border border-border bg-card p-4">
             <div className="mb-2 flex items-center justify-between gap-2">
@@ -21,7 +22,7 @@ export function HardwareNodeGrid({ nodes }: { nodes: Esp32Node[] }) {
                     : "bg-warning-soft text-warning-strong",
                 )}
               >
-                {live ? "VERIFIED" : "OFFLINE"}
+                {live ? "VERIFIED" : !isNorthCamera ? "RESERVED" : "OFFLINE"}
               </span>
             </div>
             <div className="mb-1 truncate text-xs text-sage">{node.boundary_name}</div>

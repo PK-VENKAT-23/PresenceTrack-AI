@@ -58,6 +58,7 @@ export const ROLE_LABELS: Record<UserRole, string> = {
   hr_ops: "HR Operations",
   security: "Physical Security",
   super_admin: "Super Admin & Governance",
+  dpo: "Data Protection Officer",
 };
 
 export const ATTENDANCE_STATUS_LABELS: Record<AttendanceStatus, string> = {

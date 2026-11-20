@@ -34,25 +34,80 @@ function ResetPasswordPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [error, setError] = useState("");
+  const [terminalError, setTerminalError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const hash = window.location.hash;
-    const inviteMode = hash.includes("type=invite");
-    const recoveryMode = hash.includes("type=recovery");
+    // 1. Parse both search query and hash parameters safely
+    const searchParams = new URLSearchParams(window.location.search);
+    const hashString = window.location.hash.startsWith("#")
+      ? window.location.hash.slice(1)
+      : window.location.hash;
+    const hashParams = new URLSearchParams(hashString);
+
+    // 2. Check for explicit error parameters from GoTrue in search or hash
+    const errCode =
+      searchParams.get("error_code") ||
+      searchParams.get("error") ||
+      hashParams.get("error_code") ||
+      hashParams.get("error");
+    const errDesc = searchParams.get("error_description") || hashParams.get("error_description");
+
+    if (errCode || errDesc) {
+      const isExpired =
+        errCode === "otp_expired" ||
+        /expired/i.test(errDesc ?? "") ||
+        /invalid/i.test(errDesc ?? "");
+      setTerminalError(
+        isExpired
+          ? "This link has expired or has already been used. Please request a new security link."
+          : errDesc || "Security verification failed. Please request a new link.",
+      );
+      return;
+    }
+
+    // 3. Determine flow mode
+    const flowParam = searchParams.get("flow");
+    const hashType = hashParams.get("type");
+    const inviteMode = flowParam === "invite" || hashType === "invite";
     setIsInvite(inviteMode);
 
-    const { data } = supabase.auth.onAuthStateChange((event) => {
-      if (event === "PASSWORD_RECOVERY" || event === "SIGNED_IN" || event === "INITIAL_SESSION") {
-        setReady(true);
+    // 4. Token presence check to guard against ambient pre-existing browser sessions
+    const hasTokenInHash = hashParams.has("access_token") || hashParams.has("token");
+    const hasCodeInSearch = searchParams.has("code");
+    const hasActiveTokenInUrl = hasTokenInHash || hasCodeInSearch;
+
+    let tokenVerifiedInSession = false;
+
+    const { data: authSub } = supabase.auth.onAuthStateChange((event) => {
+      if (inviteMode) {
+        if (event === "SIGNED_IN" || event === "PASSWORD_RECOVERY") {
+          tokenVerifiedInSession = true;
+          setReady(true);
+        }
+      } else {
+        if (event === "PASSWORD_RECOVERY" || (event === "SIGNED_IN" && hasActiveTokenInUrl)) {
+          tokenVerifiedInSession = true;
+          setReady(true);
+        }
       }
     });
 
+    // Check existing session: strictly require active token in URL to prevent ambient session takeover
     supabase.auth.getSession().then(({ data: s }) => {
-      if (s.session || inviteMode || recoveryMode) setReady(true);
+      if (s.session) {
+        if (hasActiveTokenInUrl || tokenVerifiedInSession) {
+          setReady(true);
+        } else {
+          // Ambient session exists without a valid callback token in the URL
+          setTerminalError(
+            "No active security token detected in this session. If you refreshed the page, the single-use token was already consumed. Please open the link directly from your email.",
+          );
+        }
+      }
     });
 
-    return () => data.subscription.unsubscribe();
+    return () => authSub.subscription.unsubscribe();
   }, []);
 
   const handleSubmit = async (e: FormEvent) => {
@@ -78,15 +133,12 @@ function ResetPasswordPage() {
     }
 
     // Record audit event
-    if (updated?.user?.id) {
-      recordAuthEvent({
-        data: {
-          action: "auth.password_changed",
-          actor_id: updated.user.id,
-          metadata: { is_invite_flow: isInvite },
-        },
-      }).catch(() => {});
-    }
+    recordAuthEvent({
+      data: {
+        action: "auth.password_changed",
+        metadata: { is_invite_flow: isInvite },
+      },
+    }).catch(() => {});
 
     navigate({ to: "/enclave", replace: true });
   };
@@ -107,7 +159,21 @@ function ResetPasswordPage() {
             : "This replaces the credential for your PresenceTrack AI account."}
         </p>
 
-        {!ready ? (
+        {terminalError ? (
+          <div className="space-y-4 py-2">
+            <div className="rounded-lg border border-destructive/30 bg-destructive-soft p-4 text-xs text-destructive leading-relaxed">
+              {terminalError}
+            </div>
+            <div className="flex items-center gap-4 pt-2">
+              <Link to="/recovery" className="glass-btn text-xs">
+                Request new recovery link
+              </Link>
+              <Link to="/login" className="text-xs text-sage underline hover:text-umbra">
+                Return to login
+              </Link>
+            </div>
+          </div>
+        ) : !ready ? (
           <div className="space-y-3 py-2">
             <p className="text-sm text-sage">
               Verifying security link… If not redirected, open this page directly from your

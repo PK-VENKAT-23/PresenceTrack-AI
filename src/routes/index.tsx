@@ -58,7 +58,6 @@ function WelcomePage() {
         </div>
         <Link
           to="/login"
-          search={{ mode: "signin" }}
           className="text-sm font-semibold text-sage hover:text-umbra"
         >
           Log in

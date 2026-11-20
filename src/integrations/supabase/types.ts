@@ -11,7 +11,7 @@ export type Database = {
       admin_audit_logs: {
         Row: {
           action: string;
-          actor_id: string;
+          actor_id: string | null;
           created_at: string;
           entity_id: string | null;
           entity_type: string;
@@ -20,7 +20,7 @@ export type Database = {
         };
         Insert: {
           action: string;
-          actor_id: string;
+          actor_id?: string | null;
           created_at?: string;
           entity_id?: string | null;
           entity_type: string;
@@ -29,7 +29,7 @@ export type Database = {
         };
         Update: {
           action?: string;
-          actor_id?: string;
+          actor_id?: string | null;
           created_at?: string;
           entity_id?: string | null;
           entity_type?: string;
@@ -168,6 +168,188 @@ export type Database = {
           },
         ];
       };
+      employee_grievances: {
+        Row: {
+          category: string;
+          created_at: string;
+          description: string;
+          employee_id: string;
+          id: string;
+          reference_number: string;
+          rejection_reason: string | null;
+          resolution_reason: string | null;
+          resolved_at: string | null;
+          status: string;
+          title: string;
+          updated_at: string;
+        };
+        Insert: {
+          category: string;
+          created_at?: string;
+          description: string;
+          employee_id: string;
+          id?: string;
+          reference_number: string;
+          rejection_reason?: string | null;
+          resolution_reason?: string | null;
+          resolved_at?: string | null;
+          status?: string;
+          title: string;
+          updated_at?: string;
+        };
+        Update: {
+          category?: string;
+          created_at?: string;
+          description?: string;
+          employee_id?: string;
+          id?: string;
+          reference_number?: string;
+          rejection_reason?: string | null;
+          resolution_reason?: string | null;
+          resolved_at?: string | null;
+          status?: string;
+          title?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "employee_grievances_employee_id_fkey";
+            columns: ["employee_id"];
+            isOneToOne: false;
+            referencedRelation: "enterprise_users";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      grievance_messages: {
+        Row: {
+          created_at: string;
+          grievance_id: string;
+          id: string;
+          is_internal_note: boolean;
+          message: string;
+          sender_id: string;
+          sender_name: string;
+          sender_role: string;
+        };
+        Insert: {
+          created_at?: string;
+          grievance_id: string;
+          id?: string;
+          is_internal_note?: boolean;
+          message: string;
+          sender_id: string;
+          sender_name: string;
+          sender_role: string;
+        };
+        Update: {
+          created_at?: string;
+          grievance_id?: string;
+          id?: string;
+          is_internal_note?: boolean;
+          message?: string;
+          sender_id?: string;
+          sender_name?: string;
+          sender_role?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "grievance_messages_grievance_id_fkey";
+            columns: ["grievance_id"];
+            isOneToOne: false;
+            referencedRelation: "employee_grievances";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      grievance_attachments: {
+        Row: {
+          created_at: string;
+          file_name: string;
+          file_size: number;
+          file_type: string;
+          file_url: string;
+          grievance_id: string;
+          id: string;
+          is_internal: boolean;
+          message_id: string | null;
+          uploaded_by: string;
+        };
+        Insert: {
+          created_at?: string;
+          file_name: string;
+          file_size: number;
+          file_type: string;
+          file_url: string;
+          grievance_id: string;
+          id?: string;
+          is_internal?: boolean;
+          message_id?: string | null;
+          uploaded_by: string;
+        };
+        Update: {
+          created_at?: string;
+          file_name?: string;
+          file_size?: number;
+          file_type?: string;
+          file_url?: string;
+          grievance_id?: string;
+          id?: string;
+          is_internal?: boolean;
+          message_id?: string | null;
+          uploaded_by?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "grievance_attachments_grievance_id_fkey";
+            columns: ["grievance_id"];
+            isOneToOne: false;
+            referencedRelation: "employee_grievances";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      grievance_notifications: {
+        Row: {
+          content: string;
+          created_at: string;
+          grievance_id: string;
+          id: string;
+          is_read: boolean;
+          title: string;
+          type: string;
+          user_id: string;
+        };
+        Insert: {
+          content: string;
+          created_at?: string;
+          grievance_id: string;
+          id?: string;
+          is_read?: boolean;
+          title: string;
+          type: string;
+          user_id: string;
+        };
+        Update: {
+          content?: string;
+          created_at?: string;
+          grievance_id?: string;
+          id?: string;
+          is_read?: boolean;
+          title?: string;
+          type?: string;
+          user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "grievance_notifications_grievance_id_fkey";
+            columns: ["grievance_id"];
+            isOneToOne: false;
+            referencedRelation: "employee_grievances";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       employee_daily_dwell: {
         Row: {
           break_minutes: number;
@@ -224,6 +406,8 @@ export type Database = {
           enrolled_embedding: Json | null;
           id: string;
           imported_role: Database["public"]["Enums"]["app_role"] | null;
+          invitation_dispatched_at: string | null;
+          invitation_status: Database["public"]["Enums"]["invitation_status"];
           is_active: boolean;
           is_in_workspace: boolean | null;
           name: string;
@@ -245,6 +429,8 @@ export type Database = {
           enrolled_embedding?: Json | null;
           id?: string;
           imported_role?: Database["public"]["Enums"]["app_role"] | null;
+          invitation_dispatched_at?: string | null;
+          invitation_status?: Database["public"]["Enums"]["invitation_status"];
           is_active?: boolean;
           is_in_workspace?: boolean | null;
           name: string;
@@ -266,6 +452,8 @@ export type Database = {
           enrolled_embedding?: Json | null;
           id?: string;
           imported_role?: Database["public"]["Enums"]["app_role"] | null;
+          invitation_dispatched_at?: string | null;
+          invitation_status?: Database["public"]["Enums"]["invitation_status"];
           is_active?: boolean;
           is_in_workspace?: boolean | null;
           name?: string;
@@ -492,6 +680,14 @@ export type Database = {
         Args: { _request_id: string };
         Returns: undefined;
       };
+      assign_user_role_atomic: {
+        Args: {
+          _target_user_id: string;
+          _new_role: Database["public"]["Enums"]["app_role"];
+          _expected_profile_id?: string | null;
+        };
+        Returns: Json;
+      };
       current_enterprise_user_id: { Args: never; Returns: string };
       exercise_erasure: { Args: { _scope: string[] }; Returns: string };
       has_any_role: {
@@ -511,8 +707,14 @@ export type Database = {
       restore_consent: { Args: never; Returns: undefined };
     };
     Enums: {
-      app_role: "employee" | "hr_ops" | "security" | "super_admin";
+      app_role: "employee" | "hr_ops" | "security" | "super_admin" | "dpo";
       attendance_status: "PRESENT" | "ABSENT" | "HALF_DAY" | "ON_LEAVE" | "HOLIDAY";
+      invitation_status:
+        | "STAGED"
+        | "DISPATCH_PENDING"
+        | "DISPATCHED"
+        | "LINKED"
+        | "RECONCILIATION_REQUIRED";
       transit_direction: "ZONE_ENTER" | "ZONE_EXIT";
       zone_type: "WORKSPACE_FLOOR" | "CAFETERIA_LOUNGE" | "OUTDOOR_TERRACE" | "CORRIDOR_TRANSIT";
     };
@@ -636,8 +838,15 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
-      app_role: ["employee", "hr_ops", "security", "super_admin"],
+      app_role: ["employee", "hr_ops", "security", "super_admin", "dpo"],
       attendance_status: ["PRESENT", "ABSENT", "HALF_DAY", "ON_LEAVE", "HOLIDAY"],
+      invitation_status: [
+        "STAGED",
+        "DISPATCH_PENDING",
+        "DISPATCHED",
+        "LINKED",
+        "RECONCILIATION_REQUIRED",
+      ],
       transit_direction: ["ZONE_ENTER", "ZONE_EXIT"],
       zone_type: ["WORKSPACE_FLOOR", "CAFETERIA_LOUNGE", "OUTDOOR_TERRACE", "CORRIDOR_TRANSIT"],
     },

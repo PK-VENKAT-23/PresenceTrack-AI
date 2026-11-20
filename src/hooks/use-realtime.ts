@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useQueryClient, type QueryKey } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 
-type Table = "passive_transits" | "esp32_camera_nodes" | "merkle_audit_blocks";
+type Table = "passive_transits" | "esp32_camera_nodes" | "merkle_audit_blocks" | "unknown_detections";
 
 /**
  * Subscribe to live row changes and refresh the given queries. Access rules still apply:

@@ -293,10 +293,8 @@ class BiometricMatcher:
         Enroll an employee. Accepts raw vector or encrypted AES-GCM envelope.
         Decryption and dimension validation happen in volatile memory.
         """
-        if isinstance(embedding, (dict, str)) and (
-            isinstance(embedding, str) or embedding.get("encrypted")
-        ):
-            # Decrypt template
+        if isinstance(embedding, (dict, str)):
+            # Decrypt template (handles AES-GCM envelope, plaintext fallback, or raw JSON)
             vec = decrypt_biometric_template(
                 embedding,
                 secret=secret or config.biometric_encryption_key,

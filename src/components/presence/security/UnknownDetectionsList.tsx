@@ -28,7 +28,7 @@ export function UnknownDetectionsList() {
 
   const alerts = (data?.detections ?? []) as UnknownDetection[];
 
-  const handleResolve = async (id: string, status: "RESOLVED" | "FALSE_POSITIVE" | "ESCALATED") => {
+  const handleResolve = async (id: string, status: "REVIEWED" | "DISMISSED") => {
     setResolvingId(id);
     try {
       const res = await resolveFn({
@@ -59,13 +59,13 @@ export function UnknownDetectionsList() {
             PENDING TRIAGE
           </span>
         );
-      case "RESOLVED":
+      case "REVIEWED":
         return (
           <span className="pill bg-success-soft text-xxs font-semibold text-success-strong">
             RESOLVED
           </span>
         );
-      case "FALSE_POSITIVE":
+      case "DISMISSED":
         return <span className="pill bg-muted text-xxs text-sage">FALSE POSITIVE</span>;
       case "ESCALATED":
         return (
@@ -100,9 +100,8 @@ export function UnknownDetectionsList() {
           >
             <option value="ALL">All Alerts</option>
             <option value="PENDING">Pending Review</option>
-            <option value="RESOLVED">Resolved</option>
-            <option value="FALSE_POSITIVE">False Positive</option>
-            <option value="ESCALATED">Escalated</option>
+            <option value="REVIEWED">Reviewed</option>
+            <option value="DISMISSED">Dismissed</option>
           </select>
 
           <button
@@ -176,7 +175,7 @@ export function UnknownDetectionsList() {
                         <button
                           type="button"
                           disabled={resolvingId === alert.id}
-                          onClick={() => handleResolve(alert.id, "RESOLVED")}
+                          onClick={() => handleResolve(alert.id, "REVIEWED")}
                           className="glass-btn border-success/40 bg-success-soft text-success-strong py-0.5 px-2 text-xxs font-semibold"
                         >
                           Acknowledge
@@ -184,7 +183,7 @@ export function UnknownDetectionsList() {
                         <button
                           type="button"
                           disabled={resolvingId === alert.id}
-                          onClick={() => handleResolve(alert.id, "FALSE_POSITIVE")}
+                          onClick={() => handleResolve(alert.id, "DISMISSED")}
                           className="glass-btn py-0.5 px-2 text-xxs"
                         >
                           False Alert

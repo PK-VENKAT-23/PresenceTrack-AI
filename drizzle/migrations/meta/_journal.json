@@ -15,6 +15,34 @@
       "when": 1794057325416,
       "tag": "0001_attendance_backend_expansion",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794057325417,
+      "tag": "0002_auth_security_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794057325418,
+      "tag": "0003_operational_security_fixes",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794057325419,
+      "tag": "0004_employee_grievance_system",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794057325420,
+      "tag": "0005_dpo_role_definition",
+      "breakpoints": true
     }
   ]
 }

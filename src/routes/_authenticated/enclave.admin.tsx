@@ -8,6 +8,7 @@ import { APP_CONFIG, isNodeLive, shortHash } from "@/lib/ambient";
 import { canAccessEnclave, enclavePathFor } from "@/lib/enclaves";
 import {
   erasureRequestsQuery,
+  liveTelemetryQuery,
   merkleBlocksQuery,
   nodesQuery,
   personnelQuery,
@@ -20,9 +21,10 @@ import { MerkleLedgerTable } from "@/components/presence/admin/MerkleLedgerTable
 import { HardwareNodeGrid } from "@/components/presence/admin/HardwareNodeGrid";
 import { VectorRotationCard } from "@/components/presence/admin/VectorRotationCard";
 import { DpoErasureQueue } from "@/components/presence/admin/DpoErasureQueue";
+import { DpoGrievanceManager } from "@/components/presence/admin/DpoGrievanceManager";
 import { PersonnelRoles } from "@/components/presence/admin/PersonnelRoles";
 import { AuditLogViewer } from "@/components/presence/admin/AuditLogViewer";
-import { Esp32CanvasOverlay } from "@/components/presence/security/Esp32CanvasOverlay";
+import { Esp32CameraControlCard } from "@/components/presence/security/Esp32CameraControlCard";
 import { playClick } from "@/lib/sound-engine";
 import { cn } from "@/lib/utils";
 
@@ -93,14 +95,32 @@ function AdminEnclave() {
     enabled: inspectHeight !== null,
   });
 
+  const { data: telemetry } = useQuery(liveTelemetryQuery());
+
   const p95 = percentile(
     transits.map((t) => Number(t.dram_scrub_ms)),
     95,
   );
-  const live = nodes.filter((n) => isNodeLive(n)).length;
+  const live = nodes.filter((n) => n.id === "ESP32-CAM-01-NORTH" && isNodeLive(n)).length;
   const verifiedPct = blocks.length
     ? Math.round((blocks.filter((b) => b.status === "VERIFIED").length / blocks.length) * 100)
     : null;
+
+  // Select active ESP32-CAM-01-NORTH if online, otherwise any active node, fallback to north node configuration
+  const activeNode =
+    nodes.find((n) => n.id === "ESP32-CAM-01-NORTH" && isNodeLive(n)) ??
+    nodes.find((n) => isNodeLive(n)) ??
+    nodes.find((n) => n.id === "ESP32-CAM-01-NORTH") ??
+    nodes[0] ??
+    null;
+  const isNodeAttested = Boolean(
+    activeNode && activeNode.id === "ESP32-CAM-01-NORTH" && isNodeLive(activeNode),
+  );
+  const isTelemetryTimeStale = telemetry?.updated_at
+    ? Date.now() - new Date(telemetry.updated_at).getTime() > 4000
+    : false;
+  const isStale = Boolean(telemetry?.is_stale) || isTelemetryTimeStale;
+  const isCameraLive = Boolean(isNodeAttested && !isStale);
 
   const handleAnchor = async () => {
     playClick();
@@ -154,19 +174,18 @@ function AdminEnclave() {
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="glass-card">
-          <h3 className="mb-3 text-sm font-semibold text-umbra">Live optical security matrix</h3>
-          <Esp32CanvasOverlay
-            isLive={live > 0}
-            faceDetected={false}
-            faceBoundingBox={null}
-            scScore={0}
-          />
-          <div className="mt-2 font-mono text-xs text-sage">
-            {live > 0 ? `${live} Node(s) Online` : "All Nodes Offline"} | Stream standby · Edge CV
-            connects in Phase 5
-          </div>
-        </div>
+        <Esp32CameraControlCard
+          nodes={nodes}
+          activeNode={activeNode}
+          isNodeAttested={isNodeAttested}
+          isCameraLive={isCameraLive}
+          live={live}
+          telemetry={telemetry}
+          onRefreshTelemetry={() => {
+            void queryClient.invalidateQueries({ queryKey: ["telemetry", "live"] });
+            void queryClient.invalidateQueries({ queryKey: ["nodes"] });
+          }}
+        />
         <div className="glass-card">
           <h3 className="mb-3 text-sm font-semibold text-umbra">
             Edge hardware enclave attestation
@@ -195,9 +214,9 @@ function AdminEnclave() {
           />
         </div>
         <div className="glass-card">
-          <DpoErasureQueue
-            requests={requests}
-            onChanged={() => {
+          <DpoGrievanceManager
+            erasureRequests={requests}
+            onErasureChanged={() => {
               void refresh("erasure-requests")();
               void refresh("transits")();
             }}
@@ -255,7 +274,11 @@ function AdminEnclave() {
           people={people}
           roles={roles}
           selfAuthId={user.id}
-          onChanged={() => void refresh("roles")()}
+          onChanged={() => {
+            void queryClient.invalidateQueries({ queryKey: ["roles"] });
+            void queryClient.invalidateQueries({ queryKey: ["personnel"] });
+            void queryClient.invalidateQueries({ queryKey: ["biometric-statuses"] });
+          }}
         />
       </div>
     </div>

@@ -89,6 +89,7 @@ export const nodesQuery = () =>
       if (error) throw error;
       return data ?? [];
     },
+    refetchInterval: 5000,
   });
 
 export interface LiveTelemetry {
@@ -97,11 +98,22 @@ export interface LiveTelemetry {
   face_detected: boolean;
   face_bounding_box: { x: number; y: number; w: number; h: number } | null;
   sc_score: number;
+  confidence_category: string;
   matched_name: string | null;
+  matched_person_id: string | null;
   person_count: number;
   active_tracks: number;
   last_event: string | null;
   updated_at: string;
+  is_stale?: boolean;
+  is_synthetic?: boolean;
+  real_frame_count?: number;
+  recovery_status?: string | null;
+  consecutive_failures?: number;
+  current_failure_reason?: string | null;
+  last_successful_frame_timestamp?: string | null;
+  last_diagnostic_timestamp?: string | null;
+  recovery_attempt_count?: number;
 }
 
 export const liveTelemetryQuery = () =>
@@ -109,7 +121,18 @@ export const liveTelemetryQuery = () =>
     queryKey: ["telemetry", "live"],
     queryFn: async (): Promise<LiveTelemetry> => {
       try {
-        const resp = await fetch("/api/public/esp32/telemetry");
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        const headers: Record<string, string> = {};
+        if (session?.access_token) {
+          headers["Authorization"] = `Bearer ${session.access_token}`;
+        }
+        const resp = await fetch("/api/public/esp32/telemetry", {
+          headers,
+          credentials: "same-origin",
+          cache: "no-store",
+        });
         if (!resp.ok) throw new Error("Failed to fetch telemetry");
         const json = await resp.json();
         return json.telemetry;
@@ -120,11 +143,16 @@ export const liveTelemetryQuery = () =>
           face_detected: false,
           face_bounding_box: null,
           sc_score: 0,
+          confidence_category: "UNKNOWN",
           matched_name: null,
+          matched_person_id: null,
           person_count: 0,
           active_tracks: 0,
           last_event: null,
           updated_at: new Date().toISOString(),
+          is_stale: false,
+          is_synthetic: false,
+          real_frame_count: 0,
         };
       }
     },
@@ -181,7 +209,7 @@ export const personnelQuery = () =>
       const { data, error } = await supabase
         .from("enterprise_users")
         .select(
-          "id, auth_user_id, email, name, badge_id, department, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, created_at",
+          "id, auth_user_id, email, name, badge_id, department, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, is_active, created_at",
         )
         .order("name");
       if (error) throw error;

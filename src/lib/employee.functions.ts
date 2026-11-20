@@ -154,28 +154,28 @@ export const updateEmployee = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await requireHrOrAdmin(context.supabase, context.userId);
 
-    const updates: Record<string, unknown> = {};
-    if (data.name !== undefined) updates["name"] = data.name;
-    if (data.badge_id !== undefined) updates["badge_id"] = data.badge_id.toUpperCase();
-    if (data.role_title !== undefined) updates["role_title"] = data.role_title;
-    if (data.employment_type !== undefined) updates["employment_type"] = data.employment_type;
-    if (data.shift_start !== undefined) updates["shift_start"] = data.shift_start;
-    if (data.shift_end !== undefined) updates["shift_end"] = data.shift_end;
-    if (data.avatar_url !== undefined) updates["avatar_url"] = data.avatar_url;
-    if (data.is_active !== undefined) updates["is_active"] = data.is_active;
+    const updates: Database["public"]["Tables"]["enterprise_users"]["Update"] = {};
+    if (data.name !== undefined) updates.name = data.name;
+    if (data.badge_id !== undefined) updates.badge_id = data.badge_id.toUpperCase();
+    if (data.role_title !== undefined) updates.role_title = data.role_title;
+    if (data.employment_type !== undefined) updates.employment_type = data.employment_type;
+    if (data.shift_start !== undefined) updates.shift_start = data.shift_start;
+    if (data.shift_end !== undefined) updates.shift_end = data.shift_end;
+    if (data.avatar_url !== undefined) updates.avatar_url = data.avatar_url;
+    if (data.is_active !== undefined) updates.is_active = data.is_active;
 
     if (data.department_id !== undefined) {
-      updates["department_id"] = data.department_id;
+      updates.department_id = data.department_id;
       if (data.department_id) {
         const { data: dept } = await context.supabase
           .from("departments")
           .select("name")
           .eq("id", data.department_id)
           .maybeSingle();
-        if (dept) updates["department"] = dept.name;
+        if (dept) updates.department = dept.name;
       }
     } else if (data.department_name !== undefined) {
-      updates["department"] = data.department_name;
+      updates.department = data.department_name;
     }
 
     const { data: updated, error } = await context.supabase
@@ -209,6 +209,42 @@ export const deactivateEmployee = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     await requireSuperAdmin(context.supabase, context.userId);
+
+    // 1. Guard against deactivating the last active Super Admin profile
+    const { data: targetProfile, error: targetErr } = await context.supabase
+      .from("enterprise_users")
+      .select("id, email, auth_user_id, is_active")
+      .eq("id", data.id)
+      .maybeSingle();
+
+    if (targetErr || !targetProfile) throw new Error("Employee profile not found");
+
+    if (targetProfile.auth_user_id) {
+      const { data: roleRow } = await context.supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", targetProfile.auth_user_id)
+        .maybeSingle();
+
+      if (roleRow?.role === "super_admin") {
+        // Count active Super Admins across roles and enterprise profiles
+        const { data: activeSuperAdmins, error: countErr } = await context.supabase
+          .from("user_roles")
+          .select("user_id, enterprise_users!inner(is_active)")
+          .eq("role", "super_admin")
+          .eq("enterprise_users.is_active", true);
+
+        if (countErr) {
+          throw new Error(`Failed to verify active Super Admin count: ${countErr.message}`);
+        }
+
+        if (activeSuperAdmins && activeSuperAdmins.length <= 1) {
+          throw new Error(
+            "Safety Violation: Cannot deactivate the last remaining active Super Admin profile in the platform.",
+          );
+        }
+      }
+    }
 
     const { error } = await context.supabase
       .from("enterprise_users")
@@ -321,20 +357,12 @@ export const assignEmployeeRole = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await requireSuperAdmin(context.supabase, context.userId);
 
-    const { error } = await context.supabase
-      .from("user_roles")
-      .upsert({ user_id: data.auth_user_id, role: data.role }, { onConflict: "user_id" });
+    const { error } = await context.supabase.rpc("assign_user_role_atomic", {
+      _target_user_id: data.auth_user_id,
+      _new_role: data.role,
+    });
 
     if (error) throw new Error(error.message);
-
-    await recordAdminAudit(
-      context.supabase,
-      context.userId,
-      "ASSIGN_ROLE",
-      "user_roles",
-      data.auth_user_id,
-      { assigned_role: data.role },
-    );
 
     return { success: true, role: data.role };
   });
@@ -423,9 +451,9 @@ export const updateDepartment = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await requireSuperAdmin(context.supabase, context.userId);
 
-    const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
-    if (data.name !== undefined) updates["name"] = data.name;
-    if (data.description !== undefined) updates["description"] = data.description;
+    const updates: Database["public"]["Tables"]["departments"]["Update"] = { updated_at: new Date().toISOString() };
+    if (data.name !== undefined) updates.name = data.name;
+    if (data.description !== undefined) updates.description = data.description;
 
     const { data: dept, error } = await context.supabase
       .from("departments")
@@ -447,6 +475,19 @@ export const updateDepartment = createServerFn({ method: "POST" })
 
     return { success: true, department: dept };
   });
+
+function notifyGatewayTemplateSync(): void {
+  const deviceKey = process.env["ESP32_DEVICE_KEY"];
+  const gatewayUrl = process.env["VISION_GATEWAY_URL"] || "http://localhost:8001";
+  if (deviceKey && typeof fetch !== "undefined") {
+    fetch(`${gatewayUrl}/api/sync-templates`, {
+      method: "POST",
+      headers: { "x-device-key": deviceKey },
+    }).catch(() => {
+      // Non-blocking: periodic background sync loop will catch updates
+    });
+  }
+}
 
 /**
  * Enroll or update an employee's facial biometric template (Super Admin only).
@@ -476,12 +517,16 @@ export const enrollEmployeeBiometrics = createServerFn({ method: "POST" })
     // Verify target employee exists
     const { data: emp, error: empErr } = await context.supabase
       .from("enterprise_users")
-      .select("id, name, badge_id, consent_revoked")
+      .select("id, name, badge_id, consent_revoked, is_active")
       .eq("id", data.employee_id)
       .maybeSingle();
 
     if (empErr || !emp) {
       throw new Error("Employee not found");
+    }
+
+    if (!emp.is_active) {
+      throw new Error("Cannot enroll biometrics for deactivated employee");
     }
 
     if (emp.consent_revoked) {
@@ -492,11 +537,16 @@ export const enrollEmployeeBiometrics = createServerFn({ method: "POST" })
 
     // Encrypt template via AES-256-GCM before storage
     const encryptedTemplate = await encryptBiometricTemplate(data.embedding);
+    const enrolledAt = new Date().toISOString();
+    const storedEnvelope = {
+      ...encryptedTemplate,
+      enrolled_at: enrolledAt,
+    };
 
     const { error: updateErr } = await context.supabase
       .from("enterprise_users")
       .update({
-        enrolled_embedding: encryptedTemplate as unknown as Json,
+        enrolled_embedding: storedEnvelope as unknown as Json,
       })
       .eq("id", data.employee_id);
 
@@ -513,9 +563,11 @@ export const enrollEmployeeBiometrics = createServerFn({ method: "POST" })
       {
         embedding_dim: data.embedding.length,
         encrypted: encryptedTemplate.encrypted,
-        enrolled_at: new Date().toISOString(),
+        enrolled_at: enrolledAt,
       },
     );
+
+    notifyGatewayTemplateSync();
 
     return {
       success: true,
@@ -523,6 +575,299 @@ export const enrollEmployeeBiometrics = createServerFn({ method: "POST" })
       encrypted: encryptedTemplate.encrypted,
       message: "Biometric template securely encrypted and enrolled",
     };
+  });
+
+/**
+ * Remove an employee's facial biometric template (Super Admin only).
+ * Complies with DPDP Act 2023 Sec. 12 right to erasure:
+ * - Immediately clears encrypted template from database
+ * - Records audit log
+ */
+export const removeEmployeeBiometrics = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((input) =>
+    z
+      .object({
+        employee_id: z.string().uuid("Valid employee ID required"),
+        reason: z.string().trim().max(255).optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    await requireSuperAdmin(context.supabase, context.userId);
+
+    const { data: emp, error: empErr } = await context.supabase
+      .from("enterprise_users")
+      .select("id, name, badge_id")
+      .eq("id", data.employee_id)
+      .maybeSingle();
+
+    if (empErr || !emp) {
+      throw new Error("Employee not found");
+    }
+
+    const { error: updateErr } = await context.supabase
+      .from("enterprise_users")
+      .update({
+        enrolled_embedding: null,
+      })
+      .eq("id", data.employee_id);
+
+    if (updateErr) {
+      throw new Error(`Failed to remove biometric template: ${updateErr.message}`);
+    }
+
+    await recordAdminAudit(
+      context.supabase,
+      context.userId,
+      "BIOMETRICS_REMOVED",
+      "enterprise_users",
+      emp.id,
+      {
+        reason: data.reason || "Administrative removal of biometric template",
+        removed_at: new Date().toISOString(),
+      },
+    );
+
+    notifyGatewayTemplateSync();
+
+    return {
+      success: true,
+      employee_id: emp.id,
+      message: "Biometric template securely erased from database",
+    };
+  });
+
+/**
+ * Update an employee's biometric consent status (Super Admin only).
+ * If consent is revoked, any enrolled biometric template is invalidated and cleared.
+ */
+export const updateEmployeeConsent = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((input) =>
+    z
+      .object({
+        employee_id: z.string().uuid("Valid employee ID required"),
+        consent_revoked: z.boolean(),
+        reason: z.string().trim().max(255).optional(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    await requireSuperAdmin(context.supabase, context.userId);
+
+    const { data: emp, error: empErr } = await context.supabase
+      .from("enterprise_users")
+      .select("id, name, badge_id, consent_revoked")
+      .eq("id", data.employee_id)
+      .maybeSingle();
+
+    if (empErr || !emp) {
+      throw new Error("Employee not found");
+    }
+
+    const updates: { consent_revoked: boolean; enrolled_embedding?: null } = {
+      consent_revoked: data.consent_revoked,
+    };
+
+    if (data.consent_revoked) {
+      updates.enrolled_embedding = null;
+    }
+
+    const { error: updateErr } = await context.supabase
+      .from("enterprise_users")
+      .update(updates)
+      .eq("id", data.employee_id);
+
+    if (updateErr) {
+      throw new Error(`Failed to update consent status: ${updateErr.message}`);
+    }
+
+    await recordAdminAudit(
+      context.supabase,
+      context.userId,
+      data.consent_revoked ? "CONSENT_REVOKED" : "CONSENT_RESTORED",
+      "enterprise_users",
+      emp.id,
+      {
+        consent_revoked: data.consent_revoked,
+        reason: data.reason || (data.consent_revoked ? "Consent revoked" : "Consent restored"),
+        timestamp: new Date().toISOString(),
+      },
+    );
+
+    notifyGatewayTemplateSync();
+
+    return {
+      success: true,
+      employee_id: emp.id,
+      consent_revoked: data.consent_revoked,
+      message: data.consent_revoked
+        ? "Consent revoked. Biometric template invalidated."
+        : "Consent restored successfully.",
+    };
+  });
+
+/**
+ * Query an employee's biometric enrollment and consent status (Super Admin only).
+ * If employee_id is provided, returns that employee's status.
+ * If employee_id is omitted, returns statuses for all personnel in the directory.
+ * Returns boolean statuses and timestamps without exposing any biometric vectors.
+ */
+export const getEmployeeBiometricStatus = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((input?: unknown) => {
+    if (!input || typeof input !== "object") {
+      return { employee_id: undefined };
+    }
+    return z
+      .object({
+        employee_id: z.string().uuid("Valid employee ID required").optional(),
+      })
+      .parse(input);
+  })
+  .handler(async ({ data, context }) => {
+    await requireSuperAdmin(context.supabase, context.userId);
+
+    if (data?.employee_id) {
+      const { data: emp, error: empErr } = await context.supabase
+        .from("enterprise_users")
+        .select("id, name, badge_id, consent_revoked, is_active, enrolled_embedding")
+        .eq("id", data.employee_id)
+        .maybeSingle();
+
+      if (empErr || !emp) {
+        throw new Error("Employee not found");
+      }
+
+      const enrolledAt =
+        emp.enrolled_embedding &&
+        typeof emp.enrolled_embedding === "object" &&
+        "enrolled_at" in (emp.enrolled_embedding as Record<string, unknown>)
+          ? String((emp.enrolled_embedding as Record<string, unknown>)["enrolled_at"])
+          : null;
+
+      return {
+        success: true,
+        employee_id: emp.id,
+        is_enrolled: emp.enrolled_embedding !== null,
+        consent_revoked: emp.consent_revoked ?? false,
+        is_active: emp.is_active ?? true,
+        enrolled_at: enrolledAt,
+      };
+    }
+
+    // Query all employee biometric statuses for directory
+    const { data: users, error: usersErr } = await context.supabase
+      .from("enterprise_users")
+      .select("id, name, badge_id, consent_revoked, is_active, enrolled_embedding");
+
+    if (usersErr) {
+      throw new Error(`Failed to query biometric statuses: ${usersErr.message}`);
+    }
+
+    const statuses: Record<
+      string,
+      {
+        employee_id: string;
+        is_enrolled: boolean;
+        consent_revoked: boolean;
+        is_active: boolean;
+        enrolled_at: string | null;
+      }
+    > = {};
+
+    for (const u of users ?? []) {
+      const uEnrolledAt =
+        u.enrolled_embedding &&
+        typeof u.enrolled_embedding === "object" &&
+        "enrolled_at" in (u.enrolled_embedding as Record<string, unknown>)
+          ? String((u.enrolled_embedding as Record<string, unknown>)["enrolled_at"])
+          : null;
+
+      statuses[u.id] = {
+        employee_id: u.id,
+        is_enrolled: u.enrolled_embedding !== null,
+        consent_revoked: u.consent_revoked ?? false,
+        is_active: u.is_active ?? true,
+        enrolled_at: uEnrolledAt,
+      };
+    }
+
+    return {
+      success: true,
+      statuses,
+    };
+  });
+
+/**
+ * Extract face embedding from a base64-encoded frame via Vision Gateway (Super Admin only).
+ * Raw image is forwarded to the edge vision gateway in ephemeral memory,
+ * where YuNet detects the face and SFace extracts the 128-d unit vector.
+ * Raw images are never stored in database or filesystem.
+ */
+export const extractFaceEmbedding = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((input) =>
+    z
+      .object({
+        image_base64: z.string().min(10, "Valid image base64 data required"),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    await requireSuperAdmin(context.supabase, context.userId);
+
+    const deviceKey = process.env["ESP32_DEVICE_KEY"];
+    const gatewayUrl = process.env["VISION_GATEWAY_URL"] || "http://localhost:8001";
+
+    try {
+      const resp = await fetch(`${gatewayUrl}/api/extract-face-embedding`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(deviceKey ? { "x-device-key": deviceKey } : {}),
+        },
+        body: JSON.stringify({ image_base64: data.image_base64 }),
+      });
+
+      if (!resp.ok) {
+        const errorData = (await resp.json().catch(() => ({ detail: `HTTP error ${resp.status}` }))) as {
+          detail?: string;
+          error?: string;
+        };
+        const message = errorData.detail || errorData.error || `Gateway extraction failed (${resp.status})`;
+        throw new Error(message);
+      }
+
+      const res = (await resp.json()) as {
+        success: boolean;
+        embedding: number[];
+        embedding_dim?: number;
+        confidence?: number;
+        bbox?: { x: number; y: number; w: number; h: number };
+        model?: string;
+        error?: string;
+      };
+
+      if (!res.success || !Array.isArray(res.embedding)) {
+        throw new Error(res.error || "No valid embedding returned from vision gateway");
+      }
+
+      return {
+        success: true,
+        embedding: res.embedding,
+        embedding_dim: res.embedding_dim ?? res.embedding.length,
+        confidence: res.confidence,
+        bbox: res.bbox,
+        model: res.model,
+      };
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error("Failed to communicate with Vision Gateway for face extraction");
+    }
   });
 
 // Re-export onboarding & account lifecycle functions

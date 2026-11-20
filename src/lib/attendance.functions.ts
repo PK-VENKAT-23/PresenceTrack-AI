@@ -329,15 +329,15 @@ export const manualCheckInFallback = createServerFn({ method: "POST" })
         status: "PRESENT",
       });
     } else {
-      const updates: Record<string, unknown> = {
+      const updates: Database["public"]["Tables"]["attendance_records"]["Update"] = {
         is_manual_entry: true,
         updated_at: isoTime,
       };
       if (data.direction === "ZONE_ENTER" && !existing.first_in) {
-        updates["first_in"] = isoTime;
+        updates.first_in = isoTime;
       }
       if (data.direction === "ZONE_EXIT") {
-        updates["last_out"] = isoTime;
+        updates.last_out = isoTime;
       }
       await context.supabase.from("attendance_records").update(updates).eq("id", existing.id);
     }

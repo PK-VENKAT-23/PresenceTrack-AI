@@ -18,3 +18,15 @@ Object.defineProperty(window, "matchMedia", {
     dispatchEvent: () => {},
   }),
 });
+
+HTMLCanvasElement.prototype.getContext = (() => ({
+  clearRect: () => {},
+  fillRect: () => {},
+  fillText: () => {},
+  beginPath: () => {},
+  moveTo: () => {},
+  lineTo: () => {},
+  stroke: () => {},
+  strokeRect: () => {},
+  setLineDash: () => {},
+})) as unknown as typeof HTMLCanvasElement.prototype.getContext;

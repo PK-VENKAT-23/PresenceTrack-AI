@@ -48,6 +48,9 @@ describe("Phase 4: Frontend Dashboards Acceptance Criteria", () => {
       total_break_minutes: 50,
       status: "PRESENT",
       missed_exit: false,
+      anomaly_reason: null,
+      approved_by: null,
+      is_manual_entry: false,
       created_at: "2026-11-10T09:15:00+05:30",
       updated_at: "2026-11-10T18:05:00+05:30",
     };

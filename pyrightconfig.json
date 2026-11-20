@@ -1,0 +1,11 @@
+{
+  "venvPath": "vision-gateway",
+  "venv": ".venv",
+  "include": [
+    "vision-gateway"
+  ],
+  "extraPaths": [
+    "vision-gateway",
+    "vision-gateway/.venv/lib/python3.13/site-packages"
+  ]
+}

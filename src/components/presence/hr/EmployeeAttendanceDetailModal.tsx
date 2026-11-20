@@ -115,20 +115,20 @@ export function EmployeeAttendanceDetailModal({
             <span className="text-sage">
               Present:{" "}
               <strong className="text-success-strong font-mono">
-                {data?.summary?.present_days ?? 0}
+                {data?.present_days ?? 0}
               </strong>{" "}
               days
             </span>
             <span className="text-sage">
               Total:{" "}
               <strong className="text-umbra font-mono">
-                {formatMinutes(data?.summary?.total_work_minutes ?? 0)}
+                {formatMinutes(data?.total_work_minutes ?? 0)}
               </strong>
             </span>
             <span className="text-sage">
               Breaks:{" "}
               <strong className="text-warning-strong font-mono">
-                {formatMinutes(data?.summary?.total_break_minutes ?? 0)}
+                {formatMinutes(data?.total_break_minutes ?? 0)}
               </strong>
             </span>
           </div>
