@@ -53,3 +53,4 @@ firmware/**/config.h
 *.njsproj
 *.sln
 *.sw?
+firmware/backup_pre_deploy_20261125/
