@@ -5,6 +5,7 @@ Supports MJPEG streams from ESP32-CAM nodes, local video files,
 and synthetic test generators.
 """
 
+import logging
 import socket
 import threading
 import time
@@ -15,6 +16,21 @@ import numpy as np
 import requests
 
 from config import config
+
+logger = logging.getLogger("uvicorn.error")
+
+
+def _safe_log(msg: str, level: str = "info"):
+    """Thread-safe logging that never raises if stdout/terminal is disconnected."""
+    try:
+        if level == "error":
+            logger.error(msg)
+        elif level == "warning":
+            logger.warning(msg)
+        else:
+            logger.info(msg)
+    except Exception:
+        pass
 
 
 def _extract_raw_socket(response) -> Optional[Any]:
@@ -101,13 +117,19 @@ class CameraStreamReader:
         self.last_frame_timestamp = 0.0
         self._actual_fps = 0.0
         self._connection_established_time = 0.0
+        self.avg_frame_interval_ms = 66.6
+        self.dropped_frames = 0
+        self.frame_queue_depth = 0
 
         self._latest_frame: Optional[np.ndarray] = None
+        self._latest_jpeg_bytes: Optional[bytes] = None
+        self._latest_jpeg_chunk: Optional[bytes] = None
         self._frame_lock = threading.Lock()
         self._lock = self._frame_lock  # Backwards compatibility alias
         self._frame_condition = threading.Condition(self._frame_lock)
         self._stream_lock = threading.Lock()
         self._reconnect_lock = threading.Lock()
+        self._thread_lifecycle_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._watchdog_thread: Optional[threading.Thread] = None
         self._reconnect_thread: Optional[threading.Thread] = None
@@ -119,12 +141,15 @@ class CameraStreamReader:
 
     @property
     def is_stale(self) -> bool:
-        """True if real camera has produced frames in the past but none within stale_timeout_sec."""
+        """True if real camera has produced frames in the past but none within stale_timeout_sec, or if transport is open but 0 frames arrive within stale_timeout_sec."""
         if self.use_synthetic or self._is_configured_synthetic():
             return False
-        if self.last_real_frame_timestamp <= 0.0:
-            return False
-        return (time.time() - self.last_real_frame_timestamp) > self.stale_timeout_sec
+        now = time.time()
+        if self.last_real_frame_timestamp > 0.0:
+            return (now - self.last_real_frame_timestamp) > self.stale_timeout_sec
+        if self._is_transport_open and self._connection_established_time > 0.0:
+            return (now - self._connection_established_time) > self.stale_timeout_sec
+        return False
 
     @property
     def is_camera_connected(self) -> bool:
@@ -268,30 +293,35 @@ class CameraStreamReader:
                 return True
 
             new_cap.release()
-            self.disconnect()
+            self.disconnect(reset_forced=False)
             return False
 
         except Exception as exc:
             err_msg = f"{type(exc).__name__}: {exc}"
-            print(f"Camera connection failed: {err_msg}")
+            _safe_log(f"Camera connection failed: {err_msg}", "warning")
             if "81" in str(self.source) and any(w in err_msg.lower() for w in ("timed out", "refused", "reset", "closed", "connection")):
-                print(
+                _safe_log(
                     f"[CameraStreamReader] HINT: ESP32-CAM supports only 1 active client stream. "
                     f"If a browser tab is directly viewing {self.source}, please close it "
-                    f"so the gateway can connect and relay the live feed to the dashboard."
+                    f"so the gateway can connect and relay the live feed to the dashboard.",
+                    "warning",
                 )
-            self.disconnect()
+            self.disconnect(reset_forced=False)
             return False
 
-    def disconnect(self):
+    def disconnect(self, reset_forced: bool = True):
         """Release video capture and HTTP stream resources and clear cached frames."""
         self._is_transport_open = False
-        self._forced_is_camera_connected = None
-        self._forced_is_camera_live = None
         self._actual_fps = 0.0
+        if reset_forced:
+            self._forced_is_camera_connected = None
+            self._forced_is_camera_live = None
 
         with self._frame_lock:
             self._latest_frame = None
+            self._latest_jpeg_bytes = None
+            self._latest_jpeg_chunk = None
+            self.frame_queue_depth = 0
             self._frame_condition.notify_all()
 
         with self._stream_lock:
@@ -318,6 +348,9 @@ class CameraStreamReader:
 
         with self._frame_lock:
             self._latest_frame = None
+            self._latest_jpeg_bytes = None
+            self._latest_jpeg_chunk = None
+            self.frame_queue_depth = 0
             self._frame_condition.notify_all()
 
         with self._stream_lock:
@@ -334,15 +367,32 @@ class CameraStreamReader:
                     pass
                 self.cap = None
 
-    def reconnect(self, force: bool = False) -> bool:
+    def probe_camera_status(self, timeout: float = 1.5) -> Tuple[bool, str]:
+        """Check whether camera hardware status endpoint responds without consuming stream."""
+        if not isinstance(self.source, str) or not self.source.lower().startswith(("http://", "https://")):
+            return True, "non-http source"
+        status_url = self.source.replace("/stream", "/status")
+        try:
+            resp = requests.get(status_url, timeout=timeout)
+            if resp.status_code == 200:
+                return True, "OK"
+            return False, f"HTTP {resp.status_code}"
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+
+    def reconnect(self, force: bool = False, drain_delay: Optional[float] = None) -> bool:
         """
         Trigger reconnection to the camera source.
         Does not disrupt a healthy, actively streaming connection unless force=True or stream is stale.
         Thread-safe against concurrent manual or background reconnect calls.
+        Ensures capture loop and watchdog threads are revived if terminated.
+        Waits drain_delay seconds after disconnect to allow single-client ESP32 socket to drain cleanly.
         """
         if self.is_camera_live and not force:
-            print(f"[CameraStreamReader] Active stream healthy ({self.real_frame_count} real frames received); skipping redundant reconnect")
+            _safe_log(f"[CameraStreamReader] Active stream healthy ({self.real_frame_count} real frames received); skipping redundant reconnect")
             return True
+
+        self.ensure_threads_running()
 
         acquired = self._reconnect_lock.acquire(timeout=5.0)
         if not acquired:
@@ -351,6 +401,12 @@ class CameraStreamReader:
         try:
             self._is_reconnecting = True
             self.disconnect()
+            # Allow ESP32 FreeRTOS stream handler time to release socket if streaming over HTTP
+            if drain_delay is None:
+                drain_delay = 0.4 if (isinstance(self.source, str) and ":81" in self.source and not self.use_synthetic) else 0.0
+            if drain_delay > 0:
+                time.sleep(drain_delay)
+
             self.reconnect_count = 0
             success = self.connect()
             return success
@@ -426,7 +482,7 @@ class CameraStreamReader:
                     self.reconnect_count = 0
                     self._connection_established_time = time.time()
                     self.last_real_frame_timestamp = time.time()
-                print(f"[CameraStreamReader] Successfully reconnected to live camera stream: {self.source}")
+                _safe_log(f"[CameraStreamReader] Successfully reconnected to live camera stream: {self.source}")
                 return
 
             src = int(self.source) if str(self.source).isdigit() else self.source
@@ -447,7 +503,7 @@ class CameraStreamReader:
                     self.reconnect_count = 0
                     self._connection_established_time = time.time()
                     self.last_real_frame_timestamp = time.time()
-                print(f"[CameraStreamReader] Successfully reconnected to camera capture: {self.source}")
+                _safe_log(f"[CameraStreamReader] Successfully reconnected to camera capture: {self.source}")
                 return
             else:
                 self.reconnect_count += 1
@@ -479,32 +535,58 @@ class CameraStreamReader:
         consecutive_empty = 0
         try:
             while self._is_transport_open:
-                start = buffer.find(b"\xff\xd8")
+                # Scan for all complete JPEG frames in the buffer to jump directly to the newest
+                last_start = -1
+                last_end = -1
+                pos = 0
+                found_count = 0
+                while True:
+                    s = buffer.find(b"\xff\xd8", pos)
+                    if s < 0:
+                        break
+                    e = buffer.find(b"\xff\xd9", s + 2)
+                    if e < 0:
+                        break
+                    last_start = s
+                    last_end = e + 2
+                    found_count += 1
+                    pos = e + 2
 
-                if start >= 0:
-                    end = buffer.find(b"\xff\xd9", start + 2)
+                if found_count > 0:
+                    if found_count > 1:
+                        self.dropped_frames += (found_count - 1)
+                    jpeg_data = bytes(buffer[last_start:last_end])
+                    del buffer[:last_end]
+                    self.frame_queue_depth = len(buffer)
 
-                    if end >= 0:
-                        jpeg_data = bytes(buffer[start:end + 2])
-                        del buffer[:end + 2]
+                    frame = cv2.imdecode(
+                        np.frombuffer(jpeg_data, dtype=np.uint8),
+                        cv2.IMREAD_COLOR,
+                    )
 
-                        frame = cv2.imdecode(
-                            np.frombuffer(jpeg_data, dtype=np.uint8),
-                            cv2.IMREAD_COLOR,
-                        )
+                    if frame is not None:
+                        with self._frame_lock:
+                            self._latest_jpeg_bytes = jpeg_data
+                            self._latest_jpeg_chunk = (
+                                b"--frame\r\n"
+                                b"Content-Type: image/jpeg\r\n"
+                                b"Content-Length: "
+                                + str(len(jpeg_data)).encode("ascii")
+                                + b"\r\n\r\n"
+                                + jpeg_data
+                                + b"\r\n"
+                            )
+                        return True, frame
 
-                        if frame is not None:
-                            return True, frame
-
-                        continue
+                    continue
 
                 try:
                     chunk = next(iterator)
                 except StopIteration:
-                    print("[CameraStreamReader] MJPEG stream iterator finished (StopIteration)")
+                    _safe_log("[CameraStreamReader] MJPEG stream iterator finished (StopIteration)", "warning")
                     return False, None
                 except Exception as stream_err:
-                    print(f"[CameraStreamReader] MJPEG stream chunk read error: {type(stream_err).__name__}: {stream_err}")
+                    _safe_log(f"[CameraStreamReader] MJPEG stream chunk read error: {type(stream_err).__name__}: {stream_err}", "warning")
                     return False, None
 
                 if chunk:
@@ -513,7 +595,7 @@ class CameraStreamReader:
                 else:
                     consecutive_empty += 1
                     if consecutive_empty >= 5:
-                        print("[CameraStreamReader] Received 5 consecutive empty stream chunks; connection closed")
+                        _safe_log("[CameraStreamReader] Received 5 consecutive empty stream chunks; connection closed", "warning")
                         return False, None
                     time.sleep(0.02)
 
@@ -526,7 +608,7 @@ class CameraStreamReader:
                         buffer.clear()
 
         except Exception as exc:
-            print(f"[CameraStreamReader] MJPEG stream read failed: {type(exc).__name__}: {exc}")
+            _safe_log(f"[CameraStreamReader] MJPEG stream read failed: {type(exc).__name__}: {exc}", "warning")
             return False, None
 
         return False, None
@@ -586,10 +668,34 @@ class CameraStreamReader:
 
         return frame
 
+    def ensure_threads_running(self):
+        """Ensure capture loop and watchdog threads are alive and running."""
+        with self._thread_lifecycle_lock:
+            if not self.is_running:
+                return
+
+            if self._thread is None or not self._thread.is_alive():
+                _safe_log("[CameraStreamReader] Reviving dead capture loop thread", "warning")
+                self._thread = threading.Thread(
+                    target=self._capture_loop,
+                    daemon=True,
+                    name="CameraCaptureLoop",
+                )
+                self._thread.start()
+
+            if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+                _safe_log("[CameraStreamReader] Reviving dead watchdog thread", "warning")
+                self._watchdog_thread = threading.Thread(
+                    target=self._watchdog_loop,
+                    daemon=True,
+                    name="CameraStreamWatchdog",
+                )
+                self._watchdog_thread.start()
+
     def start(self):
         """Start background frame capture and independent watchdog."""
-
         if self.is_running:
+            self.ensure_threads_running()
             return
 
         self.is_running = True
@@ -630,32 +736,36 @@ class CameraStreamReader:
         clears frames and closes sockets so blocked capture threads abort and reconnect.
         """
         while self.is_running:
-            time.sleep(0.5)
-            now = time.time()
-            if (
-                self._is_transport_open
-                and not self.use_synthetic
-                and not self._is_configured_synthetic()
-            ):
-                has_stalled = False
-                if self.last_real_frame_timestamp > 0.0:
-                    if (now - self.last_real_frame_timestamp) > self.stale_timeout_sec:
-                        has_stalled = True
-                elif self._connection_established_time > 0.0:
-                    if (now - self._connection_established_time) > self.stale_timeout_sec:
-                        has_stalled = True
+            try:
+                time.sleep(0.5)
+                now = time.time()
+                if (
+                    self._is_transport_open
+                    and not self.use_synthetic
+                    and not self._is_configured_synthetic()
+                ):
+                    has_stalled = False
+                    if self.last_real_frame_timestamp > 0.0:
+                        if (now - self.last_real_frame_timestamp) > self.stale_timeout_sec:
+                            has_stalled = True
+                    elif self._connection_established_time > 0.0:
+                        if (now - self._connection_established_time) > self.stale_timeout_sec:
+                            has_stalled = True
 
-                if has_stalled:
-                    stall_duration = (
-                        (now - self.last_real_frame_timestamp)
-                        if self.last_real_frame_timestamp > 0.0
-                        else (now - self._connection_established_time)
-                    )
-                    print(
-                        f"[CameraWatchdog] Real camera stream stalled for {stall_duration:.2f}s "
-                        f"(> {self.stale_timeout_sec}s threshold). Forcibly aborting dead socket."
-                    )
-                    self._abort_dead_stream()
+                    if has_stalled:
+                        stall_duration = (
+                            (now - self.last_real_frame_timestamp)
+                            if self.last_real_frame_timestamp > 0.0
+                            else (now - self._connection_established_time)
+                        )
+                        _safe_log(
+                            f"[CameraWatchdog] Real camera stream stalled for {stall_duration:.2f}s "
+                            f"(> {self.stale_timeout_sec}s threshold). Forcibly aborting dead socket.",
+                            "warning",
+                        )
+                        self._abort_dead_stream()
+            except Exception as w_err:
+                _safe_log(f"[CameraWatchdog] Error in watchdog loop: {w_err}", "error")
 
     def _capture_loop(self):
         """Continuously capture frames, detect disconnects, and auto-reconnect with exponential backoff."""
@@ -690,19 +800,20 @@ class CameraStreamReader:
                             if self._reconnect_lock.acquire(blocking=False):
                                 try:
                                     self._is_reconnecting = True
-                                    print(
+                                    _safe_log(
                                         f"[CameraStreamReader] Attempting camera reconnection "
                                         f"(attempt #{self.reconnect_count + 1}, backoff={backoff:.1f}s)..."
                                     )
                                     connected = self.connect()
                                     if connected:
-                                        print(f"[CameraStreamReader] Camera reconnection SUCCEEDED: {self.source}")
+                                        _safe_log(f"[CameraStreamReader] Camera reconnection SUCCEEDED: {self.source}")
                                         self.reconnect_count = 0
                                     else:
                                         self.reconnect_count += 1
-                                        print(
+                                        _safe_log(
                                             f"[CameraStreamReader] Camera reconnection failed; "
-                                            f"next retry in {self._get_reconnect_backoff_delay():.1f}s"
+                                            f"next retry in {self._get_reconnect_backoff_delay():.1f}s",
+                                            "warning",
                                         )
                                 finally:
                                     self._is_reconnecting = False
@@ -728,22 +839,36 @@ class CameraStreamReader:
                                     self._actual_fps = (
                                         0.9 * self._actual_fps + 0.1 * (1.0 / dt)
                                     )
+                                    self.avg_frame_interval_ms = (
+                                        0.9 * self.avg_frame_interval_ms + 0.1 * (dt * 1000.0)
+                                    )
                             self.last_frame_time = frame_now
                             self._frame_condition.notify_all()
                     else:
                         if not self.use_synthetic:
-                            print("[CameraStreamReader] Frame read returned failure; disconnecting")
-                            self.disconnect()
+                            _safe_log("[CameraStreamReader] Frame read returned failure; disconnecting", "warning")
+                            self.disconnect(reset_forced=False)
                             self._last_reconnect_attempt_time = time.time()
 
             except Exception as loop_err:
-                print(f"[CameraStreamReader] Error in capture loop: {type(loop_err).__name__}: {loop_err}")
+                _safe_log(f"[CameraStreamReader] Error in capture loop: {type(loop_err).__name__}: {loop_err}", "error")
                 if not self.use_synthetic:
-                    self.disconnect()
+                    try:
+                        self.disconnect(reset_forced=False)
+                    except Exception:
+                        pass
                     self._last_reconnect_attempt_time = time.time()
 
             elapsed = time.time() - t0
-            time.sleep(max(0.001, delay - elapsed))
+            is_http = (
+                isinstance(self.source, str)
+                and self.source.lower().startswith(("http://", "https://"))
+            )
+            if is_http and self._is_transport_open:
+                if elapsed < 0.002:
+                    time.sleep(0.002)
+            else:
+                time.sleep(max(0.001, delay - elapsed))
 
     def get_latest_frame(self) -> Optional[np.ndarray]:
         """Return a thread-safe copy of the latest frame. Returns None if stale or disconnected."""
@@ -756,6 +881,14 @@ class CameraStreamReader:
                 if self._latest_frame is not None
                 else None
             )
+
+    def get_latest_jpeg_chunk(self) -> Optional[bytes]:
+        """Return pre-formatted MJPEG chunk of latest frame directly without re-encoding."""
+        if self.is_stale or not self.is_connected:
+            return None
+
+        with self._frame_lock:
+            return self._latest_jpeg_chunk
 
     def get_frame_package(self) -> dict:
         """Return atomic snapshot of frame and telemetry counters."""
@@ -774,6 +907,9 @@ class CameraStreamReader:
                 "is_camera_connected": self.is_camera_connected,
                 "is_stale": self.is_stale,
                 "actual_fps": self.actual_fps,
+                "avg_frame_interval_ms": round(self.avg_frame_interval_ms, 2),
+                "dropped_frames": self.dropped_frames,
+                "frame_queue_depth": self.frame_queue_depth,
             }
 
     def wait_for_frame(self, timeout: float = 1.0) -> Optional[np.ndarray]:

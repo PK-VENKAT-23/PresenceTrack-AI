@@ -125,14 +125,44 @@ function SecurityEnclave() {
             faceDetected={!isStale && (telemetry?.face_detected ?? false)}
             faceBoundingBox={isStale ? null : (telemetry?.face_bounding_box ?? null)}
             scScore={isStale ? 0 : (telemetry?.sc_score ?? 0)}
+            matchScore={isStale ? 0 : (telemetry?.match_score ?? telemetry?.sc_score ?? 0)}
+            identityStatus={isStale ? "STALE" : telemetry?.identity_status}
+            matchedName={isStale || telemetry?.identity_status !== "VERIFIED" ? null : telemetry?.matched_name}
+            trackId={isStale ? null : telemetry?.track_id}
+            consecutiveMatchFrames={isStale ? 0 : (telemetry?.consecutive_match_frames ?? 0)}
+            detectedFaces={
+              isStale
+                ? []
+                : (telemetry?.detected_faces?.map((f) => ({
+                    bbox: f.bbox,
+                    identityStatus: f.identity_status,
+                    matchedName: f.matched_name,
+                    scScore: f.sc_score,
+                    trackId: f.track_id,
+                    candidateEmployeeId: f.candidate_employee_id,
+                    candidateName: f.candidate_name,
+                    similarityScore: f.similarity_score,
+                    matchingThreshold: f.matching_threshold,
+                    confirmationCount: f.confirmation_count,
+                    requiredConfirmationCount: f.required_confirmation_count,
+                    lastMatchTimestamp: f.last_match_timestamp,
+                    timeToVerifiedMs: f.time_to_verified_ms,
+                    detectionLatencyMs: f.detection_latency_ms,
+                    recognitionLatencyMs: f.recognition_latency_ms,
+                  })) ?? [])
+            }
             statusMessage={
               !isCameraLive
                 ? isStale
                   ? "Stream stale · Awaiting fresh camera frames…"
                   : "Camera node offline · Stream interrupted"
-                : !isStale && telemetry?.face_detected && telemetry.matched_name
+                : !isStale && telemetry?.face_detected && telemetry.identity_status === "VERIFIED" && telemetry.matched_name
                   ? `Optical match: ${telemetry.matched_name}`
-                  : "Perimeter Active · Standby for transits"
+                  : !isStale && telemetry?.face_detected && telemetry.identity_status === "UNKNOWN"
+                    ? `Unknown face detected (${(telemetry.sc_score ?? 0).toFixed(4)}) · No employee match`
+                    : !isStale && telemetry?.face_detected && telemetry.identity_status === "VERIFYING"
+                      ? `Verifying identity (${(telemetry.sc_score ?? 0).toFixed(4)})…`
+                      : "Perimeter Active · Standby for transits"
             }
           />
           <div className="mt-2 flex justify-between text-xs text-sage">

@@ -1,14 +1,22 @@
+import { useState, useEffect, useMemo } from "react";
 import { createFileRoute, redirect, useRouteContext } from "@tanstack/react-router";
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { ShieldAlert } from "lucide-react";
 import {
   APP_CONFIG,
+  calculateAttendanceFromTransits,
   formatMinutes,
   todayIST,
   ZONE_LABELS,
   type EnterpriseUser,
 } from "@/lib/ambient";
 import { canAccessEnclave, enclavePathFor } from "@/lib/enclaves";
-import { myDwellQuery, myErasureRequestsQuery, myTransitsQuery } from "@/lib/queries";
+import {
+  myDwellQuery,
+  myErasureRequestsQuery,
+  myProfileQuery,
+  myTransitsQuery,
+} from "@/lib/queries";
 import { useRealtimeRefresh } from "@/hooks/use-realtime";
 import { DwellTimeGauge } from "@/components/presence/employee/DwellTimeGauge";
 import { PersonalTimeline } from "@/components/presence/employee/PersonalTimeline";
@@ -72,36 +80,69 @@ function greeting() {
 }
 
 function EmployeeConsole({ profile }: { profile: EnterpriseUser }) {
+  const queryClient = useQueryClient();
+  const { data: liveProfile } = useQuery({
+    ...myProfileQuery(profile.id),
+    initialData: profile,
+  });
+  const currentProfile = liveProfile ?? profile;
+
   const { data: dwell } = useSuspenseQuery(myDwellQuery(profile.id));
   const { data: transits } = useSuspenseQuery(myTransitsQuery(profile.id));
   const { data: requests } = useSuspenseQuery(myErasureRequestsQuery(profile.id));
+
+  // Active continuous clock for live workspace presence
+  const [now, setNow] = useState(() => Date.now());
 
   useRealtimeRefresh(
     "passive_transits",
     [
       ["transits", "me"],
       ["dwell", "me"],
+      ["profile", "me"],
+      ["attendance"],
     ],
     {
       filter: `user_id=eq.${profile.id}`,
-      onInsert: playTransitBlip,
+      onInsert: () => {
+        playTransitBlip();
+        void queryClient.invalidateQueries({ queryKey: ["profile", "me", profile.id] });
+        void queryClient.invalidateQueries({ queryKey: ["attendance"] });
+      },
     },
   );
 
   const today = todayIST();
-  const todays = transits.filter(
-    (t) =>
-      new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(
-        new Date(t.timestamp),
-      ) === today,
-  );
-  const workspace = dwell?.workspace_minutes ?? 0;
-  const breaks = dwell?.break_minutes ?? 0;
+  const todays = useMemo(() => {
+    return transits.filter(
+      (t) =>
+        new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(
+          new Date(t.timestamp),
+        ) === today,
+    );
+  }, [transits, today]);
+
+  // Compute live attendance metrics from full transits + active open interval (supports midnight splitting)
+  const attendance = useMemo(() => {
+    return calculateAttendanceFromTransits(transits, now, today);
+  }, [transits, now, today]);
+
+  // Continuous ticking while inside workspace or on break
+  useEffect(() => {
+    if (attendance.is_clocked_out) return;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [attendance.is_clocked_out]);
+
+  const workspace = Math.max(attendance.total_work_minutes, dwell?.workspace_minutes ?? 0);
+  const breaks = Math.max(attendance.total_break_minutes, dwell?.break_minutes ?? 0);
   const breakSessions = todays.filter(
     (t) => t.zone_to === "CAFETERIA_LOUNGE" || t.zone_to === "OUTDOOR_TERRACE",
   ).length;
   const latest = transits[0];
-  const inside = profile.current_zone === "WORKSPACE_FLOOR";
+  const inside = currentProfile.current_zone === "WORKSPACE_FLOOR" || attendance.is_in_workspace;
 
   return (
     <div className="space-y-6">
@@ -109,11 +150,11 @@ function EmployeeConsole({ profile }: { profile: EnterpriseUser }) {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-xl font-semibold text-umbra">
-              {greeting()}, {profile.name.split(" ")[0]}.
+              {greeting()}, {currentProfile.name.split(" ")[0]}.
             </h2>
             <p className="text-sm text-sage">
-              {profile.role_title} · {profile.department} ·{" "}
-              {profile.consent_revoked
+              {currentProfile.role_title} · {currentProfile.department} ·{" "}
+              {currentProfile.consent_revoked
                 ? "Boundary telemetry paused (consent revoked)."
                 : "Your ESP32-CAM boundary telemetry is active."}
             </p>
@@ -126,36 +167,59 @@ function EmployeeConsole({ profile }: { profile: EnterpriseUser }) {
                   inside ? "animate-pulse bg-success" : "bg-warning",
                 )}
               />
-              <span className="text-xs font-semibold text-success-strong">LIVE</span>
-              <span className="text-xs text-sage">|</span>
-              <span className="text-xs text-sage">
-                {profile.current_zone
-                  ? ZONE_LABELS[profile.current_zone].toUpperCase()
-                  : "NOT DETECTED"}
+              <span className="text-xs font-semibold text-success-strong">LIVE PRESENCE:</span>
+              <span className="text-xs text-sage font-mono">
+                {inside ? "INSIDE (WORKSPACE FLOOR)" : "OUTSIDE (OFF-PREMISE)"}
               </span>
             </div>
             <div className="flex items-center gap-2 rounded-full border border-border bg-stage/80 px-3 py-1.5">
               <span
                 className={cn(
                   "h-2 w-2 rounded-full",
-                  inside && !profile.consent_revoked ? "animate-pulse bg-success" : "bg-warning",
+                  attendance.has_unresolved_historical_session
+                    ? "bg-warning animate-pulse"
+                    : inside && !currentProfile.consent_revoked
+                      ? "animate-pulse bg-success"
+                      : "bg-muted-foreground",
                 )}
               />
-              <span className="text-xs font-semibold text-penna">ATTENTION:</span>
+              <span className="text-xs font-semibold text-penna">ATTENDANCE:</span>
               <span className="text-xs text-sage font-mono">
-                {profile.consent_revoked
-                  ? "PAUSED (REVOKED)"
-                  : inside
-                    ? "DESK ACTIVE"
-                    : "AWAY / BREAK"}
+                {attendance.has_unresolved_historical_session
+                  ? "NEEDS RECONCILIATION"
+                  : currentProfile.consent_revoked
+                    ? "PAUSED (REVOKED)"
+                    : inside
+                      ? "CLOCKED IN"
+                      : "CLOCKED OUT"}
               </span>
             </div>
-            <ConsentVault profile={profile} requests={requests} />
+            <ConsentVault profile={currentProfile} requests={requests} />
           </div>
         </div>
       </div>
 
-      <ManualPunchCard profile={profile} />
+      {attendance.has_unresolved_historical_session && (
+        <div className="glass-card border-warning-strong/40 bg-warning-soft/40 p-4">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="h-5 w-5 shrink-0 text-warning-strong mt-0.5" />
+            <div className="flex-1 text-xs text-umbra">
+              <div className="font-semibold text-warning-strong">
+                Unresolved Historical Session Detected ({attendance.unresolved_session_date})
+              </div>
+              <p className="mt-1 text-sage">
+                An unclosed workspace session from{" "}
+                <strong>{attendance.unresolved_session_date}</strong> remains active in your physical
+                presence record. To preserve statutory compliance, daily productive time for today
+                is isolated from multi-day inflation. You may record a <strong>Manual Clock-Out</strong> below
+                to close this session, or contact HR to regularize the historical record.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ManualPunchCard profile={currentProfile} />
 
       <DwellTimeGauge
         workspaceMinutes={workspace}
@@ -194,10 +258,10 @@ function EmployeeConsole({ profile }: { profile: EnterpriseUser }) {
           <div
             className={cn(
               "stat-card-value font-mono",
-              profile.consent_revoked ? "text-warning-strong" : "text-success-strong",
+              currentProfile.consent_revoked ? "text-warning-strong" : "text-success-strong",
             )}
           >
-            {profile.consent_revoked ? "REVOKED" : "SEALED ✓"}
+            {currentProfile.consent_revoked ? "REVOKED" : "SEALED ✓"}
           </div>
           <div className="mt-1 text-xs text-sage">
             Memory scrub: {latest ? `${latest.dram_scrub_ms}ms` : "—"} (target &lt;{" "}
@@ -211,9 +275,9 @@ function EmployeeConsole({ profile }: { profile: EnterpriseUser }) {
         <PersonalTimeline transits={todays} oshCompliant={dwell?.osh_compliance_flag ?? true} />
       </div>
 
-      <MonthlyAttendanceCalendar employeeId={profile.id} />
+      <MonthlyAttendanceCalendar employeeId={currentProfile.id} />
 
-      <EmployeeGrievancesSection employeeId={profile.id} />
+      <EmployeeGrievancesSection employeeId={currentProfile.id} />
 
       <div className="glass-card">
         <h3 className="mb-3 text-sm font-semibold text-umbra">

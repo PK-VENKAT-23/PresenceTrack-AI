@@ -1,6 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import crypto from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type { Database, Json } from "@/integrations/supabase/types";
@@ -14,6 +13,27 @@ import {
   type GrievanceNotification,
   type GrievanceStatus,
 } from "./grievance.types";
+
+// ── Cryptographic Utilities (Universal Web Crypto) ──────────────────────────
+function getSecureRandomUUID(): string {
+  if (typeof globalThis !== "undefined" && globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function getSecureRandomHex(bytes = 4): string {
+  if (typeof globalThis !== "undefined" && globalThis.crypto?.getRandomValues) {
+    const arr = new Uint8Array(bytes);
+    globalThis.crypto.getRandomValues(arr);
+    return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+  }
+  return Math.random().toString(16).slice(2, 2 + bytes * 2).toUpperCase();
+}
 
 // ── Database Persistence Error ─────────────────────────────────────────────
 // Explicit error thrown when database or private storage operations fail.
@@ -205,7 +225,7 @@ async function getCallerProfile(supabase: SupabaseClient<Database>, authUserId: 
 /** Generate cryptographically secure reference number: GRV-YYYYMMDD-XXXXXXXX (8 hex chars) */
 export function generateSecureReferenceNumber(): string {
   const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const randomSuffix = crypto.randomBytes(4).toString("hex").toUpperCase();
+  const randomSuffix = getSecureRandomHex(4);
   return `GRV-${dateStr}-${randomSuffix}`;
 }
 
@@ -222,14 +242,14 @@ export const submitEmployeeGrievance = createServerFn({ method: "POST" })
       throw new Error("Forbidden: Deactivated personnel cannot submit grievances");
     }
 
-    const grievanceId = crypto.randomUUID();
-    const initialMessageId = crypto.randomUUID();
+    const grievanceId = getSecureRandomUUID();
+    const initialMessageId = getSecureRandomUUID();
     const now = new Date().toISOString();
 
     // Validate and process attachments server-side with magic-byte verification
     const processedAttachments = (data.attachments ?? []).map((att) => {
       const { buffer, validatedMime, extension } = validateAndProcessAttachment(att);
-      const attachmentId = crypto.randomUUID();
+      const attachmentId = getSecureRandomUUID();
       const storagePath = `${grievanceId}/${attachmentId}.${extension}`;
       return {
         id: attachmentId,
@@ -357,7 +377,7 @@ export const submitEmployeeGrievance = createServerFn({ method: "POST" })
     }
 
     // Insert confirmation notification for employee
-    const notifId = crypto.randomUUID();
+    const notifId = getSecureRandomUUID();
     const { error: nErr } = await context.supabase.from("grievance_notifications").insert({
       id: notifId,
       user_id: context.userId,
@@ -722,14 +742,14 @@ export const sendGrievanceMessage = createServerFn({ method: "POST" })
     }
 
     const now = new Date().toISOString();
-    const messageId = crypto.randomUUID();
+    const messageId = getSecureRandomUUID();
     const senderRole = isDpoOrAdmin ? "dpo" : "employee";
     const senderName = isDpoOrAdmin ? "Data Protection Officer" : (profile?.name ?? "Employee");
 
     // Validate and process attachments server-side
     const processedAttachments = (data.attachments ?? []).map((att) => {
       const { buffer, validatedMime, extension } = validateAndProcessAttachment(att);
-      const attachmentId = crypto.randomUUID();
+      const attachmentId = getSecureRandomUUID();
       const storagePath = `${data.grievance_id}/${attachmentId}.${extension}`;
       return {
         id: attachmentId,
@@ -841,7 +861,7 @@ export const sendGrievanceMessage = createServerFn({ method: "POST" })
 
       const empAuthUserId = complainantProfile?.auth_user_id ?? context.userId;
       await context.supabase.from("grievance_notifications").insert({
-        id: crypto.randomUUID(),
+        id: getSecureRandomUUID(),
         user_id: empAuthUserId,
         grievance_id: data.grievance_id,
         type: notifType,
@@ -978,7 +998,7 @@ export const updateGrievanceStatus = createServerFn({ method: "POST" })
 
     if (complainantProfile?.auth_user_id) {
       await context.supabase.from("grievance_notifications").insert({
-        id: crypto.randomUUID(),
+        id: getSecureRandomUUID(),
         user_id: complainantProfile.auth_user_id,
         grievance_id: data.grievance_id,
         type: notifType,

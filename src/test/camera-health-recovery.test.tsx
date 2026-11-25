@@ -30,12 +30,14 @@ vi.mock("@tanstack/react-start", () => {
 
 // Mock camera functions
 const mockRefreshStream = vi.fn();
+const mockRebootStream = vi.fn();
 const mockRunDiagnostics = vi.fn();
 const mockGetDiagnostics = vi.fn();
 const mockGetStatus = vi.fn();
 
 vi.mock("@/lib/camera.functions", () => ({
   refreshCameraStream: (...args: any[]) => mockRefreshStream(...args),
+  rebootCameraStream: (...args: any[]) => mockRebootStream(...args),
   runCameraDiagnostics: (...args: any[]) => mockRunDiagnostics(...args),
   getCameraDiagnostics: (...args: any[]) => mockGetDiagnostics(...args),
   getCameraStatus: (...args: any[]) => mockGetStatus(...args),
@@ -269,6 +271,111 @@ describe("Camera Health Monitor, Diagnostics & Automatic Recovery Frontend", () 
 
       await waitFor(() => {
         expect(mockRefreshStream).toHaveBeenCalledWith({ data: { force: true } });
+        expect(onRefresh).toHaveBeenCalled();
+      });
+    });
+
+    it("shows error and never reports success when manual refresh returns 0 fresh frames", async () => {
+      mockRefreshStream.mockResolvedValueOnce({
+        success: false,
+        status: "STREAM_STALE",
+        message: "Manual refresh completed but 0 fresh real frames received (2.50s)",
+        camera_connected: false,
+        real_frame_count: 1420,
+        new_frames_received: 0,
+        time_taken_sec: 2.5,
+        failure_reason: "Manual refresh completed but 0 fresh real frames received",
+      });
+
+      const onRefresh = vi.fn();
+      renderWithClient(
+        <Esp32CameraControlCard
+          nodes={mockNodes}
+          activeNode={mockNodes[0]}
+          isNodeAttested={true}
+          isCameraLive={false}
+          live={0}
+          telemetry={{ ...mockHealthyTelemetry, is_live: false, real_frame_count: 1420 }}
+          onRefreshTelemetry={onRefresh}
+        />,
+      );
+
+      const refreshBtn = screen.getByRole("button", { name: /Refresh Camera/i });
+      fireEvent.click(refreshBtn);
+
+      await waitFor(() => {
+        expect(mockRefreshStream).toHaveBeenCalledWith({ data: { force: true } });
+        expect(screen.queryByText(/Camera Stream Reconnected/i)).not.toBeInTheDocument();
+      });
+    });
+
+    it("handles network route error properly when network is unreachable", async () => {
+      mockRefreshStream.mockResolvedValueOnce({
+        success: false,
+        status: "CAMERA_OFFLINE",
+        detailed_state: "NETWORK_UNAVAILABLE",
+        message: "Network route unreachable to 10.204.175.1:81 (No route to host, errno 65) - verify Mac Wi-Fi / hotspot",
+        camera_connected: false,
+        real_frame_count: 0,
+        new_frames_received: 0,
+        time_taken_sec: 0.1,
+        failure_reason: "Network route unreachable (errno 65)",
+      });
+
+      const onRefresh = vi.fn();
+      renderWithClient(
+        <Esp32CameraControlCard
+          nodes={mockNodes}
+          activeNode={mockNodes[0]}
+          isNodeAttested={true}
+          isCameraLive={false}
+          live={0}
+          telemetry={{ ...mockHealthyTelemetry, is_live: false, real_frame_count: 0 }}
+          onRefreshTelemetry={onRefresh}
+        />,
+      );
+
+      const refreshBtn = screen.getByRole("button", { name: /Refresh Camera/i });
+      fireEvent.click(refreshBtn);
+
+      await waitFor(() => {
+        expect(mockRefreshStream).toHaveBeenCalledWith({ data: { force: true } });
+        expect(screen.queryByText(/Camera Stream Reconnected/i)).not.toBeInTheDocument();
+      });
+    });
+
+    it("triggers rebootCameraStream server function when Reboot Camera button is clicked", async () => {
+      mockRebootStream.mockResolvedValueOnce({
+        success: true,
+        status: "rebooting",
+        message: "ESP32 reboot command issued successfully. Stream recovery in progress...",
+      });
+
+      const staleTelemetry = {
+        ...mockHealthyTelemetry,
+        is_live: false,
+        recovery_status: "STREAM_STALE",
+        current_failure_reason: "Stream stalled",
+      };
+
+      const onRefresh = vi.fn();
+      renderWithClient(
+        <Esp32CameraControlCard
+          nodes={mockNodes}
+          activeNode={mockNodes[0]}
+          isNodeAttested={true}
+          isCameraLive={false}
+          live={0}
+          telemetry={staleTelemetry}
+          onRefreshTelemetry={onRefresh}
+        />,
+      );
+
+      const rebootBtn = screen.getByRole("button", { name: /Reboot Camera/i });
+      fireEvent.click(rebootBtn);
+
+      await waitFor(() => {
+        expect(mockRebootStream).toHaveBeenCalled();
         expect(onRefresh).toHaveBeenCalled();
       });
     });

@@ -38,12 +38,15 @@ export function Esp32StreamGrid({
           | "CAMERA OFFLINE"
           | "GATEWAY OFFLINE"
           | "RECOVERY FAILED"
+          | "POWER CYCLE REQUIRED"
           | "NODE OFFLINE";
         let status: NodeStreamStatus;
 
         if (!isNorthCamera) {
           // Reserved cameras remain offline per system specifications
           status = "NODE OFFLINE";
+        } else if (recoveryStatus === "PHYSICAL_POWER_CYCLE_REQUIRED") {
+          status = "POWER CYCLE REQUIRED";
         } else if (recoveryStatus === "RECOVERY_FAILED") {
           status = "RECOVERY FAILED";
         } else if (recoveryStatus === "RECONNECTING") {
@@ -54,9 +57,9 @@ export function Esp32StreamGrid({
           status = "CHECKING";
         } else if (!hasHeartbeat) {
           status = "NODE OFFLINE";
-        } else if (isStale) {
+        } else if (isStale || recoveryStatus === "STREAM_STALE") {
           status = "STREAM STALE";
-        } else if (isLive === false) {
+        } else if (isLive === false || recoveryStatus === "CAMERA_OFFLINE") {
           status = "CAMERA OFFLINE";
         } else {
           status = "LIVE";
@@ -64,7 +67,7 @@ export function Esp32StreamGrid({
 
         const isLiveFeed = status === "LIVE";
         const isSel = selected === node.id;
-        const isFailed = status === "RECOVERY FAILED" || status === "GATEWAY OFFLINE";
+        const isFailed = status === "RECOVERY FAILED" || status === "GATEWAY OFFLINE" || status === "POWER CYCLE REQUIRED";
         const isWarning = status === "STREAM STALE" || status === "RECONNECTING" || status === "CHECKING";
         return (
           <div key={node.id} className="group overflow-hidden rounded-xl border border-border">
@@ -116,8 +119,18 @@ export function Esp32StreamGrid({
                 />
                 {status}
               </div>
-              <div className="absolute right-2 bottom-2 left-2 truncate rounded bg-stage/80 px-2 py-1 text-xs text-stage-foreground">
-                {node.id} — {node.boundary_name}
+              <div className="absolute right-2 bottom-2 left-2 flex items-center justify-between rounded bg-stage/90 px-2 py-1 text-xs text-stage-foreground">
+                <span className="truncate">{node.id} — {node.boundary_name}</span>
+                <span
+                  className={cn(
+                    "ml-2 shrink-0 rounded px-1.5 py-0.5 text-xxs font-mono font-medium",
+                    isNorthCamera
+                      ? "bg-primary/20 text-penna border border-penna/30"
+                      : "bg-muted/60 text-sage",
+                  )}
+                >
+                  {isNorthCamera ? "PHYSICAL (HW)" : "RESERVED SLOT"}
+                </span>
               </div>
               <div className="absolute inset-0 flex items-center justify-center bg-stage/0 opacity-0 transition group-hover:bg-stage/30 group-hover:opacity-100">
                 <span className="flex items-center gap-2 rounded bg-stage/60 px-3 py-1.5 text-sm text-stage-foreground">

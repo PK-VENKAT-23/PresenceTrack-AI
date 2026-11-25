@@ -1,7 +1,7 @@
 # ESP32-CAM Hardware Deployment & Flashing Guide
 
-**Project:** PresenceTrack AI  
-**Target Hardware:** AI-Thinker ESP32-CAM (OV2640 Sensor + 4MB PSRAM)  
+**Project:** PresenceTrack AI
+**Target Hardware:** AI-Thinker ESP32-CAM (OV2640 Sensor + 4MB PSRAM)
 **Programmer Module:** HW-381 ESP32-CAM-MB Micro-USB Daughterboard (CH340G / CP2102)
 
 ---
@@ -122,7 +122,56 @@ Once flashing completes:
 2. **Stream Quality & Latency Check:**
    - Open a browser on the same Wi-Fi network and navigate to:
      `http://<ESP32_IP>:81/stream`
-   - Verify that the live video stream displays smoothly at 10–15 FPS in SVGA (800x600).
+   - Verify that the live video stream displays smoothly at 10–15 FPS.
+   - Query runtime status:
+     `curl http://<ESP32_IP>:81/status`
+   - Adjust settings on the fly without rebooting:
+     `curl "http://<ESP32_IP>:81/control?var=framesize&val=vga"`
+     `curl "http://<ESP32_IP>:81/control?var=brightness&val=1"`
+
+---
+
+## 6. Optical Coverage, Sensor Architecture (GC2145 & OV2640) & Runtime Controls
+
+### Supported Sensor Hardware
+The firmware supports both standard optical sensors used across AI-Thinker ESP32-CAM modules:
+- **GalaxyCore GC2145 (PID: 0x2145):** 2MP CMOS sensor. Natively captures RGB565 / YUV422 and converts frames to JPEG in PSRAM via `frame2jpg()`.
+- **OmniVision OV2640 (PID: 0x2640–0x2642):** 2MP CMOS sensor with hardware JPEG support and OmniVision DSP extensions.
+
+### Optical Field-of-View vs. Usable Recognition Coverage
+> [!NOTE]
+> Fixed optical lenses (focal length ~3.6mm, optical FOV ~66°–68°) maintain a constant physical coverage angle.
+> However, switching from **QVGA (320x240)** to **VGA (640x480)** or **SVGA (800x600)** doubles or triples the pixel density across the scene. This allows facial detection (YuNet) and recognition (SFace) to resolve facial landmarks at greater distances (2.5m–4.0m) across the optical coverage area without compromising matching thresholds.
+
+### Supported Resolutions
+- **QVGA (320x240):** Standard default. Lowest Wi-Fi bandwidth utilization and highest frame rate stability.
+- **VGA (640x480):** Recommended for corridor boundary lines. Ideal balance of facial detail and network throughput.
+- **SVGA (800x600):** Maximum optical detail across the native sensor array.
+
+### Calibrated Indoor-Lighting Defaults & Motion Stability
+- **Stable Exposure Control (`aec = 1`, `aec2 = 0`):** Standard hardware AEC provides smooth continuous exposure adjustments. `aec2` (AEC2 DSP algorithm) is disabled by default to prevent pulsing exposure oscillations ("wavy" brightness hunting) during subject motion.
+- **Natural Optical Geometry (`lenc = 0`):** Geometric lens correction DSP is disabled by default to eliminate peripheral warping ripples during head movement.
+- **Targeted Contrast & Brightness (`brightness = 1`, `contrast = 1`):** Boosts facial landmark definition without clipping highlight details or introducing non-linear tone curves (`raw_gma = 0`).
+- **Auto Gain Control (`agc = 1`, `gainceiling = 2` [8X]):** Boosts low-light signal while capping high-frequency sensor noise that causes embedding jitter.
+- **Auto White Balance (`awb = 1`):** Stabilizes facial color tones under varying indoor lighting temperatures.
+- **White Pixel Correction (`wpc = 1`):** Suppresses hot defective pixels on the sensor without introducing noise filtering latency.
+
+### Runtime HTTP Control API (Port 81)
+Adjust camera parameters on the fly without restarting the camera or interrupting the MJPEG stream:
+
+| Endpoint | Parameters | Description |
+| :--- | :--- | :--- |
+| `GET /status` | None | Returns JSON of all active sensor registers, resolution, and dimensions |
+| `GET /control` | `var=framesize&val=qvga\|vga\|svga` | Adjust resolution on the fly |
+| `GET /control` | `var=brightness&val=-2..2` | Adjust image brightness |
+| `GET /control` | `var=contrast&val=-2..2` | Adjust contrast |
+| `GET /control` | `var=saturation&val=-2..2` | Adjust color saturation |
+| `GET /control` | `var=hmirror&val=0\|1` | Toggle horizontal mirror |
+| `GET /control` | `var=vflip&val=0\|1` | Toggle vertical flip |
+| `GET /control` | `var=aec&val=0\|1` | Toggle auto exposure control |
+| `GET /control` | `var=aec2&val=0\|1` | Toggle AEC DSP algorithm |
+| `GET /control` | `var=agc&val=0\|1` | Toggle auto gain control |
+| `GET /control` | `var=lenc&val=0\|1` | Toggle lens shading correction |
 
 3. **Backend Status & Enclave Telemetry:**
    - Sign in to the PresenceTrack Governance Enclave (`/enclave/admin` or `/enclave/security`).

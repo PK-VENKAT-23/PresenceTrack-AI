@@ -13,12 +13,40 @@ const BoundingBoxSchema = z
     message: "Bounding box coordinates exceed frame boundary limits",
   });
 
+const DetectedFaceItemSchema = z.object({
+  bbox: BoundingBoxSchema,
+  identity_status: z.enum(["VERIFIED", "UNKNOWN", "VERIFYING"]),
+  matched_name: z.string().trim().max(120).nullable().optional(),
+  matched_person_id: z.string().uuid().nullable().optional(),
+  sc_score: z.number().min(0).max(1).optional(),
+  track_id: z.union([z.string(), z.number()]).nullable().optional(),
+  candidate_employee_id: z.string().trim().max(120).nullable().optional(),
+  candidate_name: z.string().trim().max(120).nullable().optional(),
+  similarity_score: z.number().min(0).max(1).optional(),
+  matching_threshold: z.number().min(0).max(1).optional(),
+  confirmation_count: z.number().int().min(0).optional(),
+  required_confirmation_count: z.number().int().min(0).optional(),
+  last_match_timestamp: z.string().datetime().nullable().optional(),
+  time_to_verified_ms: z.number().min(0).optional(),
+  detection_latency_ms: z.number().min(0).optional(),
+  recognition_latency_ms: z.number().min(0).optional(),
+});
+
 const TelemetryPayloadSchema = z.object({
   camera_id: z.string().trim().min(1).max(64),
   is_live: z.boolean(),
   face_detected: z.boolean(),
   face_bounding_box: BoundingBoxSchema.nullable().optional(),
+  detected_faces: z.array(DetectedFaceItemSchema).optional(),
   sc_score: z.number().min(0).max(1).optional(),
+  match_score: z.number().min(0).max(1).optional(),
+  identity_status: z.enum(["VERIFIED", "UNKNOWN", "VERIFYING", "NO_FACE", "STALE", "OFFLINE"]).optional(),
+  track_id: z.union([z.string(), z.number()]).nullable().optional(),
+  consent_valid: z.boolean().optional(),
+  template_match_confirmed: z.boolean().optional(),
+  consecutive_match_frames: z.number().int().min(0).optional(),
+  matching_threshold: z.number().min(0).max(1).optional(),
+  required_confirmation_count: z.number().int().min(0).optional(),
   matched_name: z.string().trim().max(120).nullable().optional(),
   matched_person_id: z.string().uuid().nullable().optional(),
   person_count: z.number().int().min(0).max(100).optional(),
@@ -35,15 +63,50 @@ const TelemetryPayloadSchema = z.object({
   last_successful_frame_timestamp: z.string().nullable().optional(),
   last_diagnostic_timestamp: z.string().nullable().optional(),
   recovery_attempt_count: z.number().int().optional(),
+  actual_fps: z.number().min(0).optional(),
+  avg_frame_interval_ms: z.number().min(0).optional(),
+  frame_processing_latency_ms: z.number().min(0).optional(),
+  face_detection_latency_ms: z.number().min(0).optional(),
+  face_recognition_latency_ms: z.number().min(0).optional(),
+  dropped_frames: z.number().int().min(0).optional(),
+  frame_queue_depth: z.number().int().min(0).optional(),
 });
+
+export interface DetectedFaceState {
+  bbox: { x: number; y: number; w: number; h: number };
+  identity_status: "VERIFIED" | "UNKNOWN" | "VERIFYING";
+  matched_name?: string | null | undefined;
+  matched_person_id?: string | null | undefined;
+  sc_score?: number | undefined;
+  track_id?: string | number | null | undefined;
+  candidate_employee_id?: string | null | undefined;
+  candidate_name?: string | null | undefined;
+  similarity_score?: number | undefined;
+  matching_threshold?: number | undefined;
+  confirmation_count?: number | undefined;
+  required_confirmation_count?: number | undefined;
+  last_match_timestamp?: string | null | undefined;
+  time_to_verified_ms?: number | undefined;
+  detection_latency_ms?: number | undefined;
+  recognition_latency_ms?: number | undefined;
+}
 
 export interface LiveTelemetryState {
   camera_id: string;
   is_live: boolean;
   face_detected: boolean;
   face_bounding_box: { x: number; y: number; w: number; h: number } | null;
+  detected_faces?: DetectedFaceState[];
   sc_score: number;
+  match_score: number;
   confidence_category: string;
+  identity_status: "VERIFIED" | "UNKNOWN" | "VERIFYING" | "NO_FACE" | "STALE";
+  track_id: string | number | null;
+  consent_valid: boolean;
+  template_match_confirmed: boolean;
+  consecutive_match_frames: number;
+  matching_threshold?: number | undefined;
+  required_confirmation_count?: number | undefined;
   matched_name: string | null;
   matched_person_id: string | null;
   person_count: number;
@@ -59,6 +122,13 @@ export interface LiveTelemetryState {
   last_successful_frame_timestamp?: string | null;
   last_diagnostic_timestamp?: string | null;
   recovery_attempt_count?: number;
+  actual_fps?: number | undefined;
+  avg_frame_interval_ms?: number | undefined;
+  frame_processing_latency_ms?: number | undefined;
+  face_detection_latency_ms?: number | undefined;
+  face_recognition_latency_ms?: number | undefined;
+  dropped_frames?: number | undefined;
+  frame_queue_depth?: number | undefined;
 }
 
 // In-memory latest telemetry state from Edge Vision Gateway
@@ -68,7 +138,15 @@ let currentTelemetry: LiveTelemetryState = {
   face_detected: false,
   face_bounding_box: null,
   sc_score: 0,
+  match_score: 0,
   confidence_category: "UNKNOWN",
+  identity_status: "NO_FACE",
+  track_id: null,
+  consent_valid: false,
+  template_match_confirmed: false,
+  consecutive_match_frames: 0,
+  matching_threshold: 0.45,
+  required_confirmation_count: 2,
   matched_name: null,
   matched_person_id: null,
   person_count: 0,
@@ -84,6 +162,13 @@ let currentTelemetry: LiveTelemetryState = {
   last_successful_frame_timestamp: null,
   last_diagnostic_timestamp: null,
   recovery_attempt_count: 0,
+  actual_fps: 0,
+  avg_frame_interval_ms: 0,
+  frame_processing_latency_ms: 0,
+  face_detection_latency_ms: 0,
+  face_recognition_latency_ms: 0,
+  dropped_frames: 0,
+  frame_queue_depth: 0,
 };
 
 // Seen nonce cache for replay protection
@@ -195,8 +280,17 @@ export const Route = createFileRoute("/api/public/esp32/telemetry")({
               real_frame_count: currentTelemetry.real_frame_count,
               face_detected: liveStatus ? currentTelemetry.face_detected : false,
               face_bounding_box: liveStatus ? currentTelemetry.face_bounding_box : null,
+              detected_faces: liveStatus ? (currentTelemetry.detected_faces ?? []) : [],
               sc_score: liveStatus ? currentTelemetry.sc_score : 0,
+              match_score: liveStatus ? currentTelemetry.match_score : 0,
               confidence_category: liveStatus ? currentTelemetry.confidence_category : "UNKNOWN",
+              identity_status: liveStatus ? currentTelemetry.identity_status : (isStale ? "STALE" : "NO_FACE"),
+              track_id: liveStatus ? currentTelemetry.track_id : null,
+              consent_valid: liveStatus ? currentTelemetry.consent_valid : false,
+              template_match_confirmed: liveStatus ? currentTelemetry.template_match_confirmed : false,
+              consecutive_match_frames: liveStatus ? currentTelemetry.consecutive_match_frames : 0,
+              matching_threshold: currentTelemetry.matching_threshold ?? 0.45,
+              required_confirmation_count: currentTelemetry.required_confirmation_count ?? 2,
               matched_name: liveStatus ? currentTelemetry.matched_name : null,
               matched_person_id: liveStatus ? currentTelemetry.matched_person_id : null,
               person_count: liveStatus ? currentTelemetry.person_count : 0,
@@ -209,6 +303,13 @@ export const Route = createFileRoute("/api/public/esp32/telemetry")({
               last_successful_frame_timestamp: currentTelemetry.last_successful_frame_timestamp ?? null,
               last_diagnostic_timestamp: currentTelemetry.last_diagnostic_timestamp ?? null,
               recovery_attempt_count: currentTelemetry.recovery_attempt_count ?? 0,
+              actual_fps: liveStatus ? (currentTelemetry.actual_fps ?? 0) : 0,
+              avg_frame_interval_ms: liveStatus ? (currentTelemetry.avg_frame_interval_ms ?? 0) : 0,
+              frame_processing_latency_ms: liveStatus ? (currentTelemetry.frame_processing_latency_ms ?? 0) : 0,
+              face_detection_latency_ms: liveStatus ? (currentTelemetry.face_detection_latency_ms ?? 0) : 0,
+              face_recognition_latency_ms: liveStatus ? (currentTelemetry.face_recognition_latency_ms ?? 0) : 0,
+              dropped_frames: currentTelemetry.dropped_frames ?? 0,
+              frame_queue_depth: liveStatus ? (currentTelemetry.frame_queue_depth ?? 0) : 0,
             },
           },
           {
@@ -259,6 +360,18 @@ export const Route = createFileRoute("/api/public/esp32/telemetry")({
           }
         }
 
+        // Out-of-order telemetry suppression: if incoming timestamp is older than currentTelemetry.updated_at by > 1000ms
+        if (d.timestamp && currentTelemetry.updated_at) {
+          const incomingTime = new Date(d.timestamp).getTime();
+          const currentTime = new Date(currentTelemetry.updated_at).getTime();
+          if (incomingTime < currentTime - 1000) {
+            return Response.json(
+              { success: true, debounced: true, message: "Out-of-order telemetry suppressed" },
+              { status: 200 },
+            );
+          }
+        }
+
         // Nonce deduplication
         if (d.event_nonce) {
           pruneOldNonces();
@@ -271,14 +384,23 @@ export const Route = createFileRoute("/api/public/esp32/telemetry")({
           seenNonces.set(d.event_nonce, Date.now());
         }
 
-        // Verify employee association and derive strict confidence category
+        // Verify employee association and derive strict confidence category and identity status
         let verifiedPersonId: string | null = null;
         let verifiedName: string | null = null;
         let verifiedCategory = "UNKNOWN";
+        let verifiedConsent = false;
+        let matchConfirmed = false;
 
-        const score = d.sc_score ?? 0;
+        const score = d.sc_score ?? d.match_score ?? 0;
 
-        if (d.matched_person_id && score >= 0.70) {
+        const isEligibleForVerification =
+          Boolean(
+            (d.identity_status === "VERIFIED" && score >= 0.45) ||
+            (d.template_match_confirmed && score >= 0.45) ||
+            (score >= 0.70 && d.identity_status !== "VERIFYING" && d.identity_status !== "UNKNOWN")
+          );
+
+        if (d.matched_person_id && isEligibleForVerification) {
           const { hasSupabaseAdminConfigured, supabaseAdmin } =
             await import("@/integrations/supabase/client.server");
 
@@ -294,22 +416,55 @@ export const Route = createFileRoute("/api/public/esp32/telemetry")({
               // Canonical name from database prevents arbitrary identity spoofing
               verifiedName = person.name;
               verifiedCategory = score >= 0.85 ? "HIGH" : "MATCHED";
+              verifiedConsent = true;
+              matchConfirmed = true;
             } else {
               // Inactive, unknown, or revoked consent: reject match association
               verifiedPersonId = null;
               verifiedName = null;
               verifiedCategory = person?.consent_revoked ? "CONSENT_REVOKED" : "UNKNOWN";
+              verifiedConsent = false;
+              matchConfirmed = false;
             }
           } else {
             verifiedPersonId = d.matched_person_id;
             verifiedName = d.matched_name ?? null;
             verifiedCategory = score >= 0.85 ? "HIGH" : "MATCHED";
+            verifiedConsent = true;
+            matchConfirmed = true;
           }
-        } else if (!d.matched_person_id && d.matched_name && score >= 0.70) {
+        } else if (!d.matched_person_id && d.matched_name && isEligibleForVerification) {
           verifiedName = d.matched_name;
           verifiedCategory = score >= 0.85 ? "HIGH" : "MATCHED";
-        } else if (score >= 0.50) {
+          verifiedConsent = true;
+          matchConfirmed = true;
+        } else if (score >= 0.363) {
           verifiedCategory = "UNCERTAIN";
+        }
+
+        // Derive strict identity_status:
+        let resolvedIdentityStatus: "VERIFIED" | "UNKNOWN" | "VERIFYING" | "NO_FACE" | "STALE" = "UNKNOWN";
+
+        if (d.is_stale) {
+          resolvedIdentityStatus = "STALE";
+        } else if (!d.face_detected) {
+          resolvedIdentityStatus = "NO_FACE";
+        } else if (
+          (verifiedPersonId || verifiedName) &&
+          score >= 0.45 &&
+          verifiedConsent &&
+          matchConfirmed &&
+          (d.identity_status === "VERIFIED" || !d.identity_status)
+        ) {
+          resolvedIdentityStatus = "VERIFIED";
+        } else if (d.identity_status === "VERIFYING" || (score >= 0.363 && score < 0.45)) {
+          resolvedIdentityStatus = "VERIFYING";
+          verifiedPersonId = null;
+          verifiedName = null;
+        } else {
+          resolvedIdentityStatus = "UNKNOWN";
+          verifiedPersonId = null;
+          verifiedName = null;
         }
 
         currentTelemetry = {
@@ -317,8 +472,36 @@ export const Route = createFileRoute("/api/public/esp32/telemetry")({
           is_live: d.is_live,
           face_detected: d.face_detected,
           face_bounding_box: d.face_bounding_box ?? null,
+          detected_faces: d.detected_faces
+            ? d.detected_faces.map((f) => ({
+                bbox: f.bbox,
+                identity_status: f.identity_status,
+                matched_name: f.identity_status === "VERIFIED" ? (f.matched_name ?? null) : null,
+                matched_person_id: f.identity_status === "VERIFIED" ? (f.matched_person_id ?? null) : null,
+                sc_score: f.sc_score ?? 0,
+                track_id: f.track_id ?? null,
+                candidate_employee_id: f.candidate_employee_id ?? null,
+                candidate_name: f.identity_status === "VERIFIED" ? (f.candidate_name ?? null) : null,
+                similarity_score: f.similarity_score ?? f.sc_score ?? 0,
+                matching_threshold: f.matching_threshold ?? 0.45,
+                confirmation_count: f.confirmation_count ?? 0,
+                required_confirmation_count: f.required_confirmation_count ?? 2,
+                last_match_timestamp: f.last_match_timestamp ?? null,
+                time_to_verified_ms: f.time_to_verified_ms ?? 0,
+                detection_latency_ms: f.detection_latency_ms ?? 0,
+                recognition_latency_ms: f.recognition_latency_ms ?? 0,
+              }))
+            : [],
           sc_score: score,
+          match_score: score,
           confidence_category: verifiedCategory,
+          identity_status: resolvedIdentityStatus,
+          track_id: d.track_id ?? (resolvedIdentityStatus === "UNKNOWN" ? "UNKNOWN-TRACK" : null),
+          consent_valid: verifiedConsent,
+          template_match_confirmed: matchConfirmed,
+          consecutive_match_frames: d.consecutive_match_frames ?? (resolvedIdentityStatus === "VERIFIED" ? 2 : 0),
+          matching_threshold: d.matching_threshold ?? 0.45,
+          required_confirmation_count: d.required_confirmation_count ?? 2,
           matched_name: verifiedName,
           matched_person_id: verifiedPersonId,
           person_count: d.person_count ?? 0,
@@ -334,6 +517,13 @@ export const Route = createFileRoute("/api/public/esp32/telemetry")({
           last_successful_frame_timestamp: d.last_successful_frame_timestamp ?? currentTelemetry.last_successful_frame_timestamp ?? null,
           last_diagnostic_timestamp: d.last_diagnostic_timestamp ?? currentTelemetry.last_diagnostic_timestamp ?? null,
           recovery_attempt_count: d.recovery_attempt_count ?? currentTelemetry.recovery_attempt_count ?? 0,
+          actual_fps: d.actual_fps ?? currentTelemetry.actual_fps ?? 0,
+          avg_frame_interval_ms: d.avg_frame_interval_ms ?? currentTelemetry.avg_frame_interval_ms ?? 0,
+          frame_processing_latency_ms: d.frame_processing_latency_ms ?? currentTelemetry.frame_processing_latency_ms ?? 0,
+          face_detection_latency_ms: d.face_detection_latency_ms ?? currentTelemetry.face_detection_latency_ms ?? 0,
+          face_recognition_latency_ms: d.face_recognition_latency_ms ?? currentTelemetry.face_recognition_latency_ms ?? 0,
+          dropped_frames: d.dropped_frames ?? currentTelemetry.dropped_frames ?? 0,
+          frame_queue_depth: d.frame_queue_depth ?? currentTelemetry.frame_queue_depth ?? 0,
         };
 
         return Response.json({ success: true, message: "Telemetry received" });

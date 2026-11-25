@@ -128,13 +128,31 @@ export const refreshCameraStream = createServerFn({ method: "POST" })
       });
 
       if (!resp.ok) {
-        const errText = await resp.text().catch(() => "");
-        throw new Error(`Gateway returned HTTP ${resp.status}: ${errText}`);
+        let detail = "";
+        try {
+          const errJson = await resp.json();
+          detail = errJson.detail || errJson.message || JSON.stringify(errJson);
+        } catch {
+          detail = await resp.text().catch(() => "");
+        }
+        return {
+          success: false,
+          status: "FAILED",
+          camera_connected: false,
+          is_synthetic: false,
+          is_stale: true,
+          real_frame_count: 0,
+          message: `Gateway HTTP ${resp.status}: ${detail || "Recovery request failed"}`,
+          new_frames_received: 0,
+          time_taken_sec: 0,
+          failure_reason: `Gateway returned HTTP ${resp.status}`,
+          recovery_status: "RECOVERY_FAILED",
+        };
       }
 
       const json = await resp.json();
       return {
-        success: json.status === "reconnected",
+        success: Boolean(json.success && json.status === "reconnected"),
         status: json.status,
         camera_connected: Boolean(json.camera_connected),
         is_synthetic: Boolean(json.is_synthetic),
@@ -294,6 +312,59 @@ export const getCameraStatus = createServerFn({ method: "GET" })
         success: false,
         status: null,
         error: err instanceof Error ? err.message : "Gateway offline",
+      };
+    }
+  });
+
+/**
+ * Safely trigger authenticated physical camera reboot.
+ * Protected: Physical Security or Super Admin only.
+ */
+export const rebootCameraStream = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await requireSecurityOrAdmin(context.supabase, context.userId);
+    const { gatewayUrl, deviceKey } = getGatewayConfig();
+
+    try {
+      const resp = await fetch(`${gatewayUrl}/camera/reboot`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(deviceKey ? { "x-device-key": deviceKey } : {}),
+        },
+      });
+
+      if (!resp.ok) {
+        let detail = "";
+        try {
+          const errJson = await resp.json();
+          detail = errJson.detail || errJson.message || "";
+        } catch {
+          detail = await resp.text().catch(() => "");
+        }
+        return {
+          success: false,
+          status: "FAILED",
+          message: `Gateway HTTP ${resp.status}: ${detail || "Reboot request failed"}`,
+          requires_physical_power_cycle: false,
+        };
+      }
+
+      const json = await resp.json();
+      return {
+        success: Boolean(json.success),
+        status: String(json.status || "UNKNOWN"),
+        message: String(json.message || ""),
+        requires_physical_power_cycle: Boolean(json.requires_physical_power_cycle),
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to communicate with Vision Gateway";
+      return {
+        success: false,
+        status: "GATEWAY_OFFLINE",
+        message: `Gateway unreachable: ${message}`,
+        requires_physical_power_cycle: false,
       };
     }
   });

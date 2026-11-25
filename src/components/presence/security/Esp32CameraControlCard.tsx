@@ -12,10 +12,12 @@ import {
   Server,
   ShieldAlert,
   Wifi,
+  Power,
+  RotateCcw,
 } from "lucide-react";
 import { GATEWAY_VIDEO_FEED_URL, Esp32CanvasOverlay } from "./Esp32CanvasOverlay";
 import { CameraDiagnosticsModal } from "./CameraDiagnosticsModal";
-import { refreshCameraStream } from "@/lib/camera.functions";
+import { refreshCameraStream, rebootCameraStream } from "@/lib/camera.functions";
 import type { Esp32Node } from "@/lib/ambient";
 import type { LiveTelemetry } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -33,11 +35,15 @@ interface Esp32CameraControlCardProps {
 export type DisplayCameraState =
   | "LIVE"
   | "CHECKING"
+  | "BACKEND STARTING"
   | "RECONNECTING"
+  | "VERIFYING FRESH FRAMES"
   | "STREAM STALE"
   | "CAMERA OFFLINE"
+  | "CAMERA REBOOTING"
   | "GATEWAY OFFLINE"
-  | "RECOVERY FAILED";
+  | "RECOVERY FAILED"
+  | "PHYSICAL POWER CYCLE REQUIRED";
 
 export function Esp32CameraControlCard({
   nodes,
@@ -49,15 +55,18 @@ export function Esp32CameraControlCard({
   onRefreshTelemetry,
 }: Esp32CameraControlCardProps) {
   const refreshStreamFn = useServerFn(refreshCameraStream);
+  const rebootStreamFn = useServerFn(rebootCameraStream);
 
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isRebooting, setIsRebooting] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [streamState, setStreamState] = useState<
     "active" | "connecting" | "error" | "timeout" | "offline"
   >("offline");
 
   // Determine state strictly following requirements:
-  // LIVE, CHECKING, RECONNECTING, STREAM STALE, CAMERA OFFLINE, GATEWAY OFFLINE, RECOVERY FAILED
+  // LIVE, CHECKING, BACKEND STARTING, CAMERA REBOOTING, RECONNECTING, VERIFYING FRESH FRAMES,
+  // STREAM STALE, CAMERA OFFLINE, GATEWAY OFFLINE, RECOVERY FAILED, PHYSICAL POWER CYCLE REQUIRED
   const recoveryStatus = telemetry?.recovery_status?.toUpperCase() || "IDLE";
   const isTelemetryTimeStale = telemetry?.updated_at
     ? Date.now() - new Date(telemetry.updated_at).getTime() > 4000
@@ -69,12 +78,20 @@ export function Esp32CameraControlCard({
 
   let displayState: DisplayCameraState;
 
-  if (isRefreshing || recoveryStatus === "RECONNECTING") {
+  if (recoveryStatus === "PHYSICAL_POWER_CYCLE_REQUIRED") {
+    displayState = "PHYSICAL POWER CYCLE REQUIRED";
+  } else if (isRebooting || recoveryStatus === "CAMERA_REBOOTING") {
+    displayState = "CAMERA REBOOTING";
+  } else if (isRefreshing || recoveryStatus === "RECONNECTING") {
     displayState = "RECONNECTING";
+  } else if (recoveryStatus === "VERIFYING_FRESH_FRAMES" || recoveryStatus === "VERIFYING") {
+    displayState = "VERIFYING FRESH FRAMES";
   } else if (recoveryStatus === "RECOVERY_FAILED" || consecutiveFailures >= 5) {
     displayState = "RECOVERY FAILED";
   } else if (recoveryStatus === "GATEWAY_OFFLINE" || (streamState === "error" && !isNodeAttested)) {
     displayState = "GATEWAY OFFLINE";
+  } else if (recoveryStatus === "BACKEND_STARTING") {
+    displayState = "BACKEND STARTING";
   } else if (isStale || recoveryStatus === "STREAM_STALE") {
     displayState = "STREAM STALE";
   } else if (!isCameraLive || !isNodeAttested || recoveryStatus === "CAMERA_OFFLINE") {
@@ -92,12 +109,12 @@ export function Esp32CameraControlCard({
       setIsRefreshing(true);
       const res = await refreshStreamFn({ data: { force: true } });
 
-      if (res.success) {
+      if (res.success && res.new_frames_received > 0) {
         toast.success(
-          `Camera stream refreshed: ${res.new_frames_received} new frames in ${res.time_taken_sec}s`,
+          `Camera stream refreshed: ${res.new_frames_received} fresh frames in ${res.time_taken_sec}s`,
         );
       } else {
-        toast.error(res.message || res.failure_reason || "Camera refresh failed");
+        toast.error(res.message || res.failure_reason || "Camera refresh failed: No fresh real frames received");
       }
 
       onRefreshTelemetry?.();
@@ -105,6 +122,24 @@ export function Esp32CameraControlCard({
       toast.error(err instanceof Error ? err.message : "Failed to refresh camera stream");
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const handleReboot = async () => {
+    try {
+      setIsRebooting(true);
+      toast.info("Sending authenticated reboot request to ESP32-CAM...");
+      const res = await rebootStreamFn();
+      if (res.success && res.status !== "FIRMWARE_RESTART_NOT_SUPPORTED") {
+        toast.success(res.message || "ESP32-CAM rebooted and stream restored successfully");
+      } else {
+        toast.error(res.message || "Camera reboot request failed or firmware does not support remote restart");
+      }
+      onRefreshTelemetry?.();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to trigger camera reboot");
+    } finally {
+      setIsRebooting(false);
     }
   };
 
@@ -131,6 +166,27 @@ export function Esp32CameraControlCard({
             RECONNECTING
           </div>
         );
+      case "VERIFYING FRESH FRAMES":
+        return (
+          <div className="flex items-center gap-1.5 rounded bg-penna/20 px-2 py-0.5 font-mono text-xs font-semibold text-penna">
+            <RefreshCw className="h-3 w-3 animate-spin text-penna" />
+            VERIFYING FRAMES
+          </div>
+        );
+      case "CAMERA REBOOTING":
+        return (
+          <div className="flex items-center gap-1.5 rounded bg-warning-soft/90 px-2 py-0.5 font-mono text-xs font-semibold text-warning-strong">
+            <RotateCcw className="h-3 w-3 animate-spin text-warning" />
+            CAMERA REBOOTING
+          </div>
+        );
+      case "BACKEND STARTING":
+        return (
+          <div className="flex items-center gap-1.5 rounded bg-penna/20 px-2 py-0.5 font-mono text-xs font-semibold text-penna">
+            <Server className="h-3 w-3 animate-pulse text-penna" />
+            BACKEND STARTING
+          </div>
+        );
       case "STREAM STALE":
         return (
           <div className="flex items-center gap-1.5 rounded bg-warning-soft/90 px-2 py-0.5 font-mono text-xs font-semibold text-warning-strong">
@@ -143,6 +199,13 @@ export function Esp32CameraControlCard({
           <div className="flex items-center gap-1.5 rounded bg-destructive-soft px-2 py-0.5 font-mono text-xs font-bold text-destructive">
             <AlertOctagon className="h-3 w-3 text-destructive" />
             RECOVERY FAILED
+          </div>
+        );
+      case "PHYSICAL POWER CYCLE REQUIRED":
+        return (
+          <div className="flex items-center gap-1.5 rounded bg-destructive-soft px-2 py-0.5 font-mono text-xs font-bold text-destructive">
+            <Power className="h-3 w-3 text-destructive animate-pulse" />
+            POWER CYCLE REQUIRED
           </div>
         );
       case "GATEWAY OFFLINE":
@@ -179,13 +242,25 @@ export function Esp32CameraControlCard({
           <button
             type="button"
             onClick={handleRefresh}
-            disabled={isRefreshing}
+            disabled={isRefreshing || isRebooting}
             className="glass-btn flex items-center gap-1.5 py-1 px-2.5 text-xs text-penna hover:bg-muted/50"
             title="Trigger safe gateway stream reconnect and verify fresh real frames"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin text-warning")} />
             {isRefreshing ? "Refreshing…" : "Refresh Camera"}
           </button>
+          {displayState !== "LIVE" && (
+            <button
+              type="button"
+              onClick={handleReboot}
+              disabled={isRebooting || isRefreshing}
+              className="glass-btn flex items-center gap-1.5 py-1 px-2.5 text-xs text-penna hover:bg-muted/50"
+              title="Request authenticated software restart of ESP32-CAM hardware"
+            >
+              <RotateCcw className={cn("h-3.5 w-3.5", isRebooting && "animate-spin text-warning")} />
+              {isRebooting ? "Rebooting…" : "Reboot Camera"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setShowDiagnostics(true)}
@@ -200,27 +275,65 @@ export function Esp32CameraControlCard({
 
       {/* Primary Video Feed Overlay */}
       <Esp32CanvasOverlay
-        isLive={isCameraLive && displayState !== "RECOVERY FAILED"}
-        isStale={isStale || isRefreshing || displayState === "RECONNECTING"}
+        isLive={isCameraLive && displayState !== "RECOVERY FAILED" && displayState !== "PHYSICAL POWER CYCLE REQUIRED"}
+        isStale={isStale || isRefreshing || displayState === "RECONNECTING" || displayState === "CAMERA REBOOTING"}
         streamUrl={isNodeAttested ? GATEWAY_VIDEO_FEED_URL : null}
         faceDetected={!isStale && (telemetry?.face_detected ?? false)}
         faceBoundingBox={isStale ? null : (telemetry?.face_bounding_box ?? null)}
         scScore={isStale ? 0 : (telemetry?.sc_score ?? 0)}
+        matchScore={isStale ? 0 : (telemetry?.match_score ?? telemetry?.sc_score ?? 0)}
+        identityStatus={isStale ? "STALE" : telemetry?.identity_status}
+        matchedName={isStale || telemetry?.identity_status !== "VERIFIED" ? null : telemetry?.matched_name}
+        trackId={isStale ? null : telemetry?.track_id}
+        consecutiveMatchFrames={isStale ? 0 : (telemetry?.consecutive_match_frames ?? 0)}
+        detectedFaces={
+          isStale
+            ? []
+            : (telemetry?.detected_faces?.map((f) => ({
+                bbox: f.bbox,
+                identityStatus: f.identity_status,
+                matchedName: f.matched_name,
+                scScore: f.sc_score,
+                trackId: f.track_id,
+                candidateEmployeeId: f.candidate_employee_id,
+                candidateName: f.candidate_name,
+                similarityScore: f.similarity_score,
+                matchingThreshold: f.matching_threshold,
+                confirmationCount: f.confirmation_count,
+                requiredConfirmationCount: f.required_confirmation_count,
+                lastMatchTimestamp: f.last_match_timestamp,
+                timeToVerifiedMs: f.time_to_verified_ms,
+                detectionLatencyMs: f.detection_latency_ms,
+                recognitionLatencyMs: f.recognition_latency_ms,
+              })) ?? [])
+        }
         onStreamStatusChange={setStreamState}
         statusMessage={
-          displayState === "RECONNECTING"
-            ? "Reconnecting to camera stream · Verifying fresh frames…"
-            : displayState === "RECOVERY FAILED"
-              ? "Automatic recovery failed · Manual Refresh required"
-              : displayState === "GATEWAY OFFLINE"
-                ? "Vision Gateway offline on port 8001"
-                : isStale
-                  ? "Stream stale · Awaiting fresh camera frames…"
-                  : !isCameraLive
-                    ? "Waiting for edge camera stream…"
-                    : !isStale && telemetry?.face_detected && telemetry.matched_name
-                      ? `Optical match: ${telemetry.matched_name}`
-                      : "Optical boundary active · Standby for transit"
+          displayState === "PHYSICAL POWER CYCLE REQUIRED"
+            ? "Camera unreachable · Physical power cycle required (unplug/replug)"
+            : displayState === "CAMERA REBOOTING"
+              ? "Rebooting ESP32-CAM · Awaiting Wi-Fi reconnection…"
+              : displayState === "VERIFYING FRESH FRAMES"
+                ? "Camera connected · Verifying fresh real frames…"
+                : displayState === "RECONNECTING"
+                  ? "Reconnecting to camera stream · Verifying fresh frames…"
+                  : displayState === "BACKEND STARTING"
+                    ? "Website backend starting on port 8080…"
+                    : displayState === "RECOVERY FAILED"
+                      ? "Automatic recovery failed · Manual Refresh required"
+                      : displayState === "GATEWAY OFFLINE"
+                        ? "Vision Gateway offline on port 8001"
+                        : isStale
+                          ? "Stream stale · Awaiting fresh camera frames…"
+                          : !isCameraLive
+                            ? "Waiting for edge camera stream…"
+                            : !isStale && telemetry?.face_detected && telemetry.identity_status === "VERIFIED" && telemetry.matched_name
+                              ? `Optical match: ${telemetry.matched_name}`
+                              : !isStale && telemetry?.face_detected && telemetry.identity_status === "UNKNOWN"
+                                ? `Unknown face detected (${(telemetry.sc_score ?? 0).toFixed(4)}) · No employee match`
+                                : !isStale && telemetry?.face_detected && telemetry.identity_status === "VERIFYING"
+                                  ? `Verifying identity (${(telemetry.sc_score ?? 0).toFixed(4)})…`
+                                  : "Optical boundary active · Standby for transit"
         }
       />
 
@@ -289,6 +402,21 @@ export function Esp32CameraControlCard({
           </span>
         </div>
       </div>
+
+      {/* Real-time Pipeline Latency & Diagnostic Metrics */}
+      {isCameraLive && (
+        <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1 rounded bg-surface/50 px-2 py-1 font-mono text-[10px] text-muted-foreground border border-border/30">
+          <span>
+            FPS: <strong className="text-foreground">{telemetry?.actual_fps ?? 0}</strong> ({telemetry?.avg_frame_interval_ms ?? 0}ms)
+          </span>
+          <span>
+            Pipeline: <strong className="text-foreground">{telemetry?.frame_processing_latency_ms ?? 0}ms</strong> (Det: {telemetry?.face_detection_latency_ms ?? 0}ms · Rec: {telemetry?.face_recognition_latency_ms ?? 0}ms)
+          </span>
+          <span>
+            Queue: <strong className="text-foreground">{telemetry?.frame_queue_depth ?? 0}</strong> · Drops: <strong className="text-foreground">{telemetry?.dropped_frames ?? 0}</strong>
+          </span>
+        </div>
+      )}
 
       {/* Node Attestation & Stream Footer */}
       <div className="mt-2 flex items-center justify-between font-mono text-xs text-sage">

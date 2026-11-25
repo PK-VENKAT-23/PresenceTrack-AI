@@ -1087,7 +1087,12 @@ def test_camera_stream_reader_prevent_duplicate_reconnect():
 def test_api_camera_reconnect_endpoint(client):
     """Verify POST /camera/reconnect endpoint triggers reconnect and returns accurate status."""
     dummy_frame = np.zeros((100, 100, 3), dtype=np.uint8)
-    with patch.object(camera, "reconnect", return_value=True), \
+
+    def fake_reconnect(*args, **kwargs):
+        camera.real_frame_count += 5
+        return True
+
+    with patch.object(camera, "reconnect", side_effect=fake_reconnect), \
          patch.object(camera, "read_frame", return_value=(True, dummy_frame)), \
          patch.object(CameraStreamReader, "is_camera_connected", new_callable=PropertyMock, return_value=True), \
          patch.object(CameraStreamReader, "is_stale", new_callable=PropertyMock, return_value=False):

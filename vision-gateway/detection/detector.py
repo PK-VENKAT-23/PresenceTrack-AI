@@ -95,7 +95,9 @@ class LightweightDetector:
         # 1. Primary: YuNet Face Detector with 5 facial landmarks
         if self.yunet_detector is not None:
             try:
-                self.yunet_detector.setInputSize((w, h))
+                if getattr(self, "_last_input_size", None) != (w, h):
+                    self.yunet_detector.setInputSize((w, h))
+                    self._last_input_size = (w, h)
                 _, faces = self.yunet_detector.detect(frame)
                 if faces is not None and len(faces) > 0:
                     for face in faces:
@@ -176,7 +178,9 @@ class LightweightDetector:
 
         return detections
 
-    def detect_persons(self, frame: np.ndarray) -> List[Detection]:
+    def detect_persons(
+        self, frame: np.ndarray, detected_faces: Optional[List[Detection]] = None
+    ) -> List[Detection]:
         """Detect persons (bodies or upper bodies) in the frame."""
         if frame is None or frame.size == 0:
             return []
@@ -209,7 +213,7 @@ class LightweightDetector:
 
         # Fallback: if face is detected but body cascade missed, project a person bounding box
         # from face coordinates (face typically occupies upper 15-25% of body)
-        faces = self.detect_faces(frame)
+        faces = detected_faces if detected_faces is not None else self.detect_faces(frame)
         for f in faces:
             # Check if there is already an overlapping person box
             matched_body = False
@@ -242,8 +246,8 @@ class LightweightDetector:
         return detections
 
     def detect_all(self, frame: np.ndarray) -> Dict[str, List[Detection]]:
-        """Run both face and person detection on the frame."""
+        """Run both face and person detection on the frame with zero redundant neural inference."""
         faces = self.detect_faces(frame)
-        persons = self.detect_persons(frame)
+        persons = self.detect_persons(frame, detected_faces=faces)
         return {"faces": faces, "persons": persons}
 

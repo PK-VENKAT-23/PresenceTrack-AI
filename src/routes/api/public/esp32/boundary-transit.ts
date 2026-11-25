@@ -132,6 +132,14 @@ export const Route = createFileRoute("/api/public/esp32/boundary-transit")({
           .select("id, timestamp")
           .single();
         if (error || !inserted) {
+          if (error?.code === "PGRST116") {
+            // Cancelled by database BEFORE INSERT trigger returning NULL (exact duplicate within 3s)
+            return Response.json({
+              success: true,
+              debounced: true,
+              message: "Duplicate transit suppressed (debounced by database trigger)",
+            });
+          }
           console.error("boundary-transit insert failed", error?.message);
           return Response.json(
             { success: false, error: "Failed to record transit" },

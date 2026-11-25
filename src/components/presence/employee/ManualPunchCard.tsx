@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { LogIn, LogOut, ShieldAlert, CheckCircle2 } from "lucide-react";
 import { manualCheckInFallback } from "@/lib/attendance.functions";
 import { ZONE_LABELS, type EnterpriseUser } from "@/lib/ambient";
+import { myProfileQuery } from "@/lib/queries";
 
 interface ManualPunchCardProps {
   profile: EnterpriseUser;
@@ -19,7 +20,13 @@ export function ManualPunchCard({ profile, onSuccess }: ManualPunchCardProps) {
   const [notes, setNotes] = useState("");
   const [showConfirm, setShowConfirm] = useState(false);
 
-  const isInside = profile.current_zone === "WORKSPACE_FLOOR";
+  // Authoritative live profile query with instantaneous fallback to prop
+  const { data: liveProfile } = useQuery({
+    ...myProfileQuery(profile.id),
+    initialData: profile,
+  });
+  const currentProfile = liveProfile ?? profile;
+  const isInside = currentProfile.current_zone === "WORKSPACE_FLOOR";
 
   const handleTriggerPunch = (dir: "ZONE_ENTER" | "ZONE_EXIT") => {
     setDirection(dir);
@@ -45,11 +52,13 @@ export function ManualPunchCard({ profile, onSuccess }: ManualPunchCardProps) {
         );
         setNotes("");
         await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["profile", "me"] }),
+          queryClient.invalidateQueries({ queryKey: ["attendance"] }),
           queryClient.invalidateQueries({ queryKey: ["dwell", "me"] }),
           queryClient.invalidateQueries({ queryKey: ["transits", "me"] }),
-          queryClient.invalidateQueries({ queryKey: ["attendance"] }),
           queryClient.invalidateQueries({ queryKey: ["personnel"] }),
         ]);
+        await queryClient.refetchQueries({ queryKey: ["profile", "me", profile.id] });
         onSuccess?.();
       }
     } catch (err) {
@@ -78,7 +87,7 @@ export function ManualPunchCard({ profile, onSuccess }: ManualPunchCardProps) {
           <div className="rounded-xl border border-border/40 bg-muted/30 px-3 py-1.5 text-right">
             <div className="text-xxs text-sage">Current Presence</div>
             <div className="font-mono text-xs font-semibold text-umbra">
-              {profile.current_zone ? ZONE_LABELS[profile.current_zone] : "Off Premise"}
+              {currentProfile.current_zone ? ZONE_LABELS[currentProfile.current_zone] : "Off Premise"}
             </div>
           </div>
         </div>
@@ -138,8 +147,8 @@ export function ManualPunchCard({ profile, onSuccess }: ManualPunchCardProps) {
               onClick={() => handleTriggerPunch("ZONE_ENTER")}
               className={`glass-btn flex items-center gap-2 py-2 text-xs font-semibold ${
                 !isInside
-                  ? "border-success/40 bg-success-soft text-success-strong hover:bg-success/20"
-                  : "opacity-40"
+                  ? "border-success/40 bg-success-soft text-success-strong hover:bg-success/20 cursor-pointer"
+                  : "opacity-40 cursor-not-allowed"
               }`}
             >
               <LogIn className="h-4 w-4" />
@@ -152,18 +161,23 @@ export function ManualPunchCard({ profile, onSuccess }: ManualPunchCardProps) {
               onClick={() => handleTriggerPunch("ZONE_EXIT")}
               className={`glass-btn flex items-center gap-2 py-2 text-xs font-semibold ${
                 isInside
-                  ? "border-warning/40 bg-warning-soft text-warning-strong hover:bg-warning/20"
-                  : "opacity-40"
+                  ? "border-warning/40 bg-warning-soft text-warning-strong hover:bg-warning/20 cursor-pointer"
+                  : "opacity-40 cursor-not-allowed"
               }`}
             >
               <LogOut className="h-4 w-4" />
               Manual Clock-Out (Exit Workspace)
             </button>
 
-            {isInside && (
-              <span className="flex items-center gap-1 text-xxs text-success-strong">
+            {isInside ? (
+              <span className="flex items-center gap-1 text-xxs font-semibold text-success-strong">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 Clocked In
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-xxs font-medium text-sage">
+                <CheckCircle2 className="h-3.5 w-3.5 text-sage" />
+                Clocked Out
               </span>
             )}
           </div>

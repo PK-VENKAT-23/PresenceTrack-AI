@@ -136,6 +136,54 @@ describe("Phase 5: Vision Gateway & Security Telemetry Integration", () => {
       expect(screen.getByText("Sc 0.9421")).toBeDefined();
     });
 
+    it("strictly displays NEW / UNKNOWN IDENTITY and never Identity Verified for score 0.2220", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.2220}
+          identityStatus="UNKNOWN"
+          trackId="UNKNOWN-TRACK-001"
+        />,
+      );
+      expect(screen.queryByText(/Identity Verified/)).toBeNull();
+      expect(screen.getByText(/NEW \/ UNKNOWN IDENTITY/)).toBeDefined();
+      expect(screen.getByText("Sc 0.2220")).toBeDefined();
+    });
+
+    it("displays VERIFYING IDENTITY when confirmation is incomplete", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.7378}
+          identityStatus="VERIFYING"
+          consecutiveMatchFrames={1}
+        />,
+      );
+      expect(screen.queryByText(/Identity Verified/)).toBeNull();
+      expect(screen.getByText(/VERIFYING IDENTITY/)).toBeDefined();
+      expect(screen.getByText("Sc 0.7378")).toBeDefined();
+    });
+
+    it("displays Identity Verified with matched employee name when status is VERIFIED", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.8850}
+          identityStatus="VERIFIED"
+          matchedName="Test Employee"
+          consecutiveMatchFrames={2}
+        />,
+      );
+      expect(screen.getByText("Identity Verified: Test Employee")).toBeDefined();
+      expect(screen.getByText("Sc 0.8850")).toBeDefined();
+    });
+
     it("displays awaiting transit indicator when live but no face is detected", () => {
       render(
         <Esp32CanvasOverlay
@@ -594,6 +642,47 @@ describe("Phase 5: Vision Gateway & Security Telemetry Integration", () => {
       // Must use canonical name from DB ("Priya Sharma"), not spoofed name
       expect(data.telemetry.matched_name).toBe("Priya Sharma");
     });
+
+    it("POST telemetry with score 0.2220 resolves identity_status: UNKNOWN and never verifies identity", async () => {
+      const postHandler = getServerHandler(TelemetryRoute, "POST");
+      const getHandler = getServerHandler(TelemetryRoute, "GET");
+
+      const response = await postHandler!({
+        request: new Request("http://localhost:3000/api/public/esp32/telemetry", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-device-key": "test-device-secret-key-32",
+          },
+          body: JSON.stringify({
+            camera_id: "ESP32-CAM-01-NORTH",
+            is_live: true,
+            face_detected: true,
+            face_bounding_box: { x: 50, y: 50, w: 100, h: 100 },
+            sc_score: 0.2220,
+            identity_status: "UNKNOWN",
+            track_id: "UNKNOWN-TRACK-001",
+            matched_person_id: null,
+            matched_name: null,
+            timestamp: new Date().toISOString(),
+          }),
+        }),
+      });
+      expect(response.status).toBe(200);
+
+      const getRes = await getHandler!({
+        request: new Request("http://localhost:3000/api/public/esp32/telemetry", {
+          headers: { authorization: "Bearer valid-security-token" },
+        }),
+      });
+      const data = await getRes.json();
+      expect(data.telemetry.sc_score).toBe(0.2220);
+      expect(data.telemetry.identity_status).toBe("UNKNOWN");
+      expect(data.telemetry.confidence_category).toBe("UNKNOWN");
+      expect(data.telemetry.matched_person_id).toBeNull();
+      expect(data.telemetry.matched_name).toBeNull();
+      expect(data.telemetry.track_id).toBe("UNKNOWN-TRACK-001");
+    });
   });
 
   describe("Boundary Transit Gate & Low Confidence Alerting", () => {
@@ -711,6 +800,569 @@ describe("Phase 5: Vision Gateway & Security Telemetry Integration", () => {
       });
       expect(data.templates[0]).not.toHaveProperty("raw_embedding");
       expect(data.templates[0]).not.toHaveProperty("embedding");
+    });
+  });
+
+  describe("Continuous Live Face Verification & Bottom Name Overlay", () => {
+    it("displays VERIFIED USER: VENKAT PK at bottom of feed with green indicator for registered user", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.8850}
+          identityStatus="VERIFIED"
+          matchedName="Venkat PK"
+          consecutiveMatchFrames={2}
+        />,
+      );
+      const banner = screen.getByTestId("bottom-identity-banner");
+      expect(banner).toBeDefined();
+      expect(screen.getByText("VERIFIED USER: VENKAT PK")).toBeDefined();
+
+      const indicator = screen.getByTestId("bottom-identity-indicator");
+      expect(indicator.style.backgroundColor).toBe("rgb(16, 185, 129)"); // #10B981
+    });
+
+    it("displays UNKNOWN PERSON at bottom of feed with red indicator for unregistered face (score 0.2220)", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.2220}
+          identityStatus="UNKNOWN"
+          trackId="UNKNOWN-TRACK-001"
+        />,
+      );
+      expect(screen.getByText("UNKNOWN PERSON")).toBeDefined();
+      expect(screen.queryByText(/VERIFIED USER/)).toBeNull();
+
+      const indicator = screen.getByTestId("bottom-identity-indicator");
+      expect(indicator.style.backgroundColor).toBe("rgb(239, 68, 68)"); // #EF4444
+    });
+
+    it("displays VERIFYING IDENTITY... at bottom of feed with amber indicator during confirmation", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.7200}
+          identityStatus="VERIFYING"
+          consecutiveMatchFrames={1}
+        />,
+      );
+      expect(screen.getByText("VERIFYING IDENTITY...")).toBeDefined();
+      expect(screen.queryByText(/VERIFIED USER/)).toBeNull();
+
+      const indicator = screen.getByTestId("bottom-identity-indicator");
+      expect(indicator.style.backgroundColor).toBe("rgb(245, 158, 11)"); // #F59E0B
+    });
+
+    it("displays NO FACE DETECTED with slate indicator when no face is present or camera is offline", () => {
+      const { rerender } = render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+        />,
+      );
+      expect(screen.getByText("NO FACE DETECTED")).toBeDefined();
+      const indicator = screen.getByTestId("bottom-identity-indicator");
+      expect(indicator.style.backgroundColor).toBe("rgb(100, 116, 139)"); // #64748B
+
+      // Offline camera
+      rerender(
+        <Esp32CanvasOverlay
+          isLive={false}
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+        />,
+      );
+      expect(screen.getByText("NO FACE DETECTED")).toBeDefined();
+    });
+
+    it("clears verified name when person leaves camera view or stream becomes stale", () => {
+      const { rerender } = render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.8850}
+          identityStatus="VERIFIED"
+          matchedName="Venkat PK"
+          consecutiveMatchFrames={2}
+        />,
+      );
+      expect(screen.getByText("VERIFIED USER: VENKAT PK")).toBeDefined();
+
+      // Person leaves view (faceDetected -> false)
+      rerender(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={false}
+          faceBoundingBox={null}
+          scScore={0}
+          identityStatus="NO_FACE"
+          matchedName={null}
+        />,
+      );
+      expect(screen.queryByText("VERIFIED USER: VENKAT PK")).toBeNull();
+      expect(screen.getByText("NO FACE DETECTED")).toBeDefined();
+
+      // Stream becomes stale
+      rerender(
+        <Esp32CanvasOverlay
+          isLive={true}
+          isStale={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.8850}
+          identityStatus="STALE"
+          matchedName="Venkat PK"
+        />,
+      );
+      expect(screen.queryByText("VERIFIED USER: VENKAT PK")).toBeNull();
+      expect(screen.getByText("NO FACE DETECTED")).toBeDefined();
+    });
+
+    it("never reuses previous person's identity when tracking changes or becomes uncertain even if stale matchedName prop is passed", () => {
+      // Stale matchedName passed from previous frame, but current status is UNKNOWN
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.2220}
+          identityStatus="UNKNOWN"
+          matchedName="Venkat PK"
+          trackId="UNKNOWN-TRACK-001"
+        />,
+      );
+      expect(screen.queryByText(/VERIFIED USER/)).toBeNull();
+      expect(screen.queryByText("Venkat PK")).toBeNull();
+      expect(screen.getByText("UNKNOWN PERSON")).toBeDefined();
+      const indicator = screen.getByTestId("bottom-identity-indicator");
+      expect(indicator.style.backgroundColor).toBe("rgb(239, 68, 68)");
+    });
+
+    it("renders multiple detectedFaces with independent bounding boxes", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          detectedFaces={[
+            {
+              bbox: { x: 50, y: 50, w: 80, h: 80 },
+              identityStatus: "VERIFIED",
+              matchedName: "Venkat PK",
+              scScore: 0.89,
+              trackId: "TRK-01",
+            },
+            {
+              bbox: { x: 200, y: 50, w: 80, h: 80 },
+              identityStatus: "UNKNOWN",
+              matchedName: null,
+              scScore: 0.2220,
+              trackId: "UNKNOWN-TRACK-002",
+            },
+          ]}
+        />,
+      );
+      expect(screen.getByText("VERIFIED USER: VENKAT PK")).toBeDefined();
+      const indicator = screen.getByTestId("bottom-identity-indicator");
+      expect(indicator.style.backgroundColor).toBe("rgb(16, 185, 129)");
+    });
+
+    it("telemetry API route (/api/public/esp32/telemetry) accepts and persists detected_faces", async () => {
+      const postHandler = getServerHandler(TelemetryRoute, "POST");
+      const getHandler = getServerHandler(TelemetryRoute, "GET");
+
+      const payload = {
+        camera_id: "ESP32-CAM-01-NORTH",
+        is_live: true,
+        face_detected: true,
+        face_bounding_box: { x: 100, y: 80, w: 90, h: 90 },
+        sc_score: 0.89,
+        match_score: 0.89,
+        identity_status: "VERIFIED",
+        track_id: "TRK-01",
+        matched_name: "Venkat PK",
+        matched_person_id: "a0000000-0000-0000-0000-000000000001",
+        consent_revoked: false,
+        consent_valid: true,
+        template_match_confirmed: true,
+        consecutive_match_frames: 2,
+        detected_faces: [
+          {
+            bbox: { x: 100, y: 80, w: 90, h: 90 },
+            identity_status: "VERIFIED",
+            matched_name: "Venkat PK",
+            matched_person_id: "a0000000-0000-0000-0000-000000000001",
+            sc_score: 0.89,
+            track_id: "TRK-01",
+          },
+          {
+            bbox: { x: 250, y: 80, w: 90, h: 90 },
+            identity_status: "UNKNOWN",
+            matched_name: null,
+            matched_person_id: null,
+            sc_score: 0.2220,
+            track_id: "UNKNOWN-TRACK-002",
+          },
+        ],
+      };
+
+      const postReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-device-key": "test-device-secret-key-32",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const postRes = await postHandler({ request: postReq });
+      expect(postRes.status).toBe(200);
+
+      const getReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        headers: {
+          authorization: "Bearer valid-security-token",
+        },
+      });
+      const getRes = await getHandler({ request: getReq });
+      expect(getRes.status).toBe(200);
+      const telemetry = await getRes.json();
+      expect(telemetry.success).toBe(true);
+      expect(telemetry.telemetry.matched_name).toBe("Priya Sharma");
+      expect(telemetry.telemetry.identity_status).toBe("VERIFIED");
+      expect(Array.isArray(telemetry.telemetry.detected_faces)).toBe(true);
+      expect(telemetry.telemetry.detected_faces).toHaveLength(2);
+      expect(telemetry.telemetry.detected_faces[0].matched_name).toBe("Venkat PK");
+      expect(telemetry.telemetry.detected_faces[1].identity_status).toBe("UNKNOWN");
+      // Raw embedding vectors must NEVER be present
+      expect(telemetry.telemetry).not.toHaveProperty("embedding");
+      expect(telemetry.telemetry).not.toHaveProperty("raw_vector");
+    });
+
+    it("telemetry API route verifies registered employee with calibrated score 0.4886", async () => {
+      const postHandler = getServerHandler(TelemetryRoute, "POST");
+      const getHandler = getServerHandler(TelemetryRoute, "GET");
+
+      const payload = {
+        camera_id: "ESP32-CAM-01-NORTH",
+        is_live: true,
+        face_detected: true,
+        face_bounding_box: { x: 100, y: 80, w: 90, h: 90 },
+        sc_score: 0.4886,
+        match_score: 0.4886,
+        identity_status: "VERIFIED",
+        track_id: "TRK-01",
+        matched_name: "Priya Sharma",
+        matched_person_id: "a0000000-0000-0000-0000-000000000001",
+        consent_revoked: false,
+        consent_valid: true,
+        template_match_confirmed: true,
+        consecutive_match_frames: 2,
+        matching_threshold: 0.45,
+        required_confirmation_count: 2,
+        detected_faces: [
+          {
+            bbox: { x: 100, y: 80, w: 90, h: 90 },
+            identity_status: "VERIFIED",
+            matched_name: "Priya Sharma",
+            matched_person_id: "a0000000-0000-0000-0000-000000000001",
+            sc_score: 0.4886,
+            track_id: "TRK-01",
+            candidate_employee_id: "a0000000-0000-0000-0000-000000000001",
+            candidate_name: "Priya Sharma",
+            similarity_score: 0.4886,
+            matching_threshold: 0.45,
+            confirmation_count: 2,
+            required_confirmation_count: 2,
+          },
+        ],
+      };
+
+      const postReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-device-key": "test-device-secret-key-32",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const postRes = await postHandler({ request: postReq });
+      expect(postRes.status).toBe(200);
+
+      const getReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        headers: {
+          authorization: "Bearer valid-security-token",
+        },
+      });
+      const getRes = await getHandler({ request: getReq });
+      expect(getRes.status).toBe(200);
+      const data = await getRes.json();
+      expect(data.success).toBe(true);
+      expect(data.telemetry.identity_status).toBe("VERIFIED");
+      expect(data.telemetry.matched_name).toBe("Priya Sharma");
+      expect(data.telemetry.sc_score).toBe(0.4886);
+      expect(data.telemetry.confidence_category).toBe("MATCHED");
+      expect(data.telemetry.matching_threshold).toBe(0.45);
+      expect(data.telemetry.required_confirmation_count).toBe(2);
+      expect(data.telemetry.detected_faces[0].candidate_employee_id).toBe("a0000000-0000-0000-0000-000000000001");
+      expect(data.telemetry.detected_faces[0].confirmation_count).toBe(2);
+    });
+
+    it("telemetry API route classifies ambiguous score 0.4000 as VERIFYING and hides identity", async () => {
+      const postHandler = getServerHandler(TelemetryRoute, "POST");
+      const getHandler = getServerHandler(TelemetryRoute, "GET");
+
+      const payload = {
+        camera_id: "ESP32-CAM-01-NORTH",
+        is_live: true,
+        face_detected: true,
+        face_bounding_box: { x: 100, y: 80, w: 90, h: 90 },
+        sc_score: 0.4000,
+        match_score: 0.4000,
+        identity_status: "VERIFYING",
+        track_id: "TRK-02",
+        matched_name: null,
+        matched_person_id: null,
+        consent_revoked: false,
+        consent_valid: true,
+        template_match_confirmed: false,
+        consecutive_match_frames: 1,
+        matching_threshold: 0.45,
+        required_confirmation_count: 2,
+        detected_faces: [
+          {
+            bbox: { x: 100, y: 80, w: 90, h: 90 },
+            identity_status: "VERIFYING",
+            matched_name: null,
+            matched_person_id: null,
+            sc_score: 0.4000,
+            track_id: "TRK-02",
+            candidate_employee_id: "a0000000-0000-0000-0000-000000000001",
+            candidate_name: null, // Suppressed during verification
+            similarity_score: 0.4000,
+            matching_threshold: 0.45,
+            confirmation_count: 1,
+            required_confirmation_count: 2,
+          },
+        ],
+      };
+
+      const postReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-device-key": "test-device-secret-key-32",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const postRes = await postHandler({ request: postReq });
+      expect(postRes.status).toBe(200);
+
+      const getReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        headers: {
+          authorization: "Bearer valid-security-token",
+        },
+      });
+      const getRes = await getHandler({ request: getReq });
+      expect(getRes.status).toBe(200);
+      const data = await getRes.json();
+      expect(data.success).toBe(true);
+      expect(data.telemetry.identity_status).toBe("VERIFYING");
+      expect(data.telemetry.matched_name).toBeNull();
+      expect(data.telemetry.matched_person_id).toBeNull();
+      expect(data.telemetry.detected_faces[0].candidate_name).toBeNull();
+    });
+
+    it("Esp32CanvasOverlay renders VERIFIED badge and registered name with score 0.4886", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.4886}
+          identityStatus="VERIFIED"
+          matchedName="Venkat PK"
+          trackId="TRK-01"
+          consecutiveMatchFrames={2}
+        />,
+      );
+      expect(screen.getByText("VERIFIED USER: VENKAT PK")).toBeDefined();
+      const indicator = screen.getByTestId("bottom-identity-indicator");
+      expect(indicator.style.backgroundColor).toBe("rgb(16, 185, 129)");
+    });
+
+    it("Esp32CanvasOverlay renders VERIFYING IDENTITY... and amber indicator when verifying", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.4886}
+          identityStatus="VERIFYING"
+          matchedName={null}
+          trackId="TRK-01"
+          consecutiveMatchFrames={1}
+        />,
+      );
+      expect(screen.queryByText(/VERIFIED USER/)).toBeNull();
+      expect(screen.getByText("VERIFYING IDENTITY...")).toBeDefined();
+      const indicator = screen.getByTestId("bottom-identity-indicator");
+      expect(indicator.style.backgroundColor).toBe("rgb(245, 158, 11)");
+    });
+
+    it("telemetry API route accepts and returns performance diagnostics (fps, latencies, drops, queue)", async () => {
+      const postHandler = getServerHandler(TelemetryRoute, "POST");
+      const getHandler = getServerHandler(TelemetryRoute, "GET");
+
+      const payload = {
+        camera_id: "ESP32-CAM-01-NORTH",
+        is_live: true,
+        face_detected: true,
+        face_bounding_box: { x: 100, y: 80, w: 90, h: 90 },
+        sc_score: 0.4886,
+        match_score: 0.4886,
+        identity_status: "VERIFIED",
+        track_id: "TRK-PERF",
+        matched_name: "Priya Sharma",
+        matched_person_id: "a0000000-0000-0000-0000-000000000001",
+        consent_valid: true,
+        template_match_confirmed: true,
+        consecutive_match_frames: 2,
+        matching_threshold: 0.45,
+        required_confirmation_count: 2,
+        actual_fps: 15.2,
+        avg_frame_interval_ms: 65.8,
+        frame_processing_latency_ms: 22.4,
+        face_detection_latency_ms: 12.1,
+        face_recognition_latency_ms: 8.3,
+        dropped_frames: 3,
+        frame_queue_depth: 1,
+        detected_faces: [
+          {
+            bbox: { x: 100, y: 80, w: 90, h: 90 },
+            identity_status: "VERIFIED",
+            matched_name: "Priya Sharma",
+            matched_person_id: "a0000000-0000-0000-0000-000000000001",
+            sc_score: 0.4886,
+            track_id: "TRK-PERF",
+            candidate_employee_id: "a0000000-0000-0000-0000-000000000001",
+            candidate_name: "Priya Sharma",
+            similarity_score: 0.4886,
+            matching_threshold: 0.45,
+            confirmation_count: 2,
+            required_confirmation_count: 2,
+            time_to_verified_ms: 130.5,
+            detection_latency_ms: 12.1,
+            recognition_latency_ms: 8.3,
+          },
+        ],
+      };
+
+      const postReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-device-key": "test-device-secret-key-32",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const postRes = await postHandler({ request: postReq });
+      expect(postRes.status).toBe(200);
+
+      const getReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        headers: {
+          authorization: "Bearer valid-security-token",
+        },
+      });
+      const getRes = await getHandler({ request: getReq });
+      expect(getRes.status).toBe(200);
+      const data = await getRes.json();
+      expect(data.telemetry.actual_fps).toBe(15.2);
+      expect(data.telemetry.avg_frame_interval_ms).toBe(65.8);
+      expect(data.telemetry.frame_processing_latency_ms).toBe(22.4);
+      expect(data.telemetry.face_detection_latency_ms).toBe(12.1);
+      expect(data.telemetry.face_recognition_latency_ms).toBe(8.3);
+      expect(data.telemetry.dropped_frames).toBe(3);
+      expect(data.telemetry.frame_queue_depth).toBe(1);
+      expect(data.telemetry.detected_faces[0].time_to_verified_ms).toBe(130.5);
+      expect(data.telemetry.detected_faces[0].detection_latency_ms).toBe(12.1);
+    });
+
+    it("telemetry API route suppresses out-of-order telemetry packets", async () => {
+      const postHandler = getServerHandler(TelemetryRoute, "POST");
+
+      // Post newer packet
+      const newerTime = new Date().toISOString();
+      const newerPayload = {
+        camera_id: "ESP32-CAM-01-NORTH",
+        is_live: true,
+        face_detected: false,
+        timestamp: newerTime,
+      };
+
+      const newerReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-device-key": "test-device-secret-key-32",
+        },
+        body: JSON.stringify(newerPayload),
+      });
+      const newerRes = await postHandler({ request: newerReq });
+      expect(newerRes.status).toBe(200);
+
+      // Post older delayed packet (e.g. 5 seconds older than currentTelemetry.updated_at)
+      const olderTime = new Date(Date.now() - 5000).toISOString();
+      const olderPayload = {
+        camera_id: "ESP32-CAM-01-NORTH",
+        is_live: true,
+        face_detected: true,
+        timestamp: olderTime,
+      };
+
+      const olderReq = new Request("http://localhost:3000/api/public/esp32/telemetry", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-device-key": "test-device-secret-key-32",
+        },
+        body: JSON.stringify(olderPayload),
+      });
+      const olderRes = await postHandler({ request: olderReq });
+      expect(olderRes.status).toBe(200);
+      const data = await olderRes.json();
+      expect(data.debounced).toBe(true);
+      expect(data.message).toContain("Out-of-order telemetry suppressed");
+    });
+
+    it("Esp32CanvasOverlay immediately clears displayed verified identity when stream becomes stale", () => {
+      render(
+        <Esp32CanvasOverlay
+          isLive={true}
+          isStale={true}
+          faceDetected={true}
+          faceBoundingBox={{ x: 100, y: 80, w: 90, h: 90 }}
+          scScore={0.88}
+          identityStatus="STALE"
+          matchedName="Venkat PK"
+          trackId="TRK-01"
+          consecutiveMatchFrames={2}
+        />,
+      );
+      // When stale, verified identity must be cleared from the UI immediately
+      expect(screen.queryByText(/VERIFIED USER: VENKAT PK/)).toBeNull();
+      expect(screen.getByText("NO FACE DETECTED")).toBeDefined();
     });
   });
 });

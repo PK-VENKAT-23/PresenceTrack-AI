@@ -28,10 +28,27 @@ class Track:
     consent_revoked: bool = False
     last_crossing: Optional[CrossingDirection] = None
     last_crossing_frame: int = -9999
+    # Strict identity classification & confirmation tracking
+    consecutive_match_frames: int = 0
+    verifying_frames: int = 0
+    missed_frames: int = 0
+    first_candidate_time: float = 0.0
+    time_to_verified_ms: float = 0.0
+    candidate_person_id: Optional[str] = None
+    candidate_name: Optional[str] = None
+    candidate_cosine: float = 0.0
+    identity_status: str = "UNKNOWN"  # "VERIFIED", "VERIFYING", "UNKNOWN"
+    is_verified: bool = False
+    ephemeral_id: str = ""
+
+    def __post_init__(self):
+        if not self.ephemeral_id:
+            self.ephemeral_id = f"UNKNOWN-TRACK-{self.track_id:03d}"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "track_id": self.track_id,
+            "ephemeral_id": self.ephemeral_id,
             "bbox": {"x": self.bbox[0], "y": self.bbox[1], "w": self.bbox[2], "h": self.bbox[3]},
             "centroid": {"x": self.centroid[0], "y": self.centroid[1]},
             "trajectory_length": len(self.trajectory),
@@ -39,6 +56,12 @@ class Track:
             "matched_name": self.matched_name,
             "matched_cosine": round(self.matched_cosine, 4),
             "last_crossing": self.last_crossing.value if self.last_crossing else None,
+            "identity_status": self.identity_status,
+            "is_verified": self.is_verified,
+            "consecutive_match_frames": self.consecutive_match_frames,
+            "verifying_frames": self.verifying_frames,
+            "missed_frames": self.missed_frames,
+            "time_to_verified_ms": self.time_to_verified_ms,
         }
 
 

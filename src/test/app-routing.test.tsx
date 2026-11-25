@@ -14,4 +14,29 @@ describe("App routing", () => {
 
     expect(matches.at(-1)?.routeId).not.toBe(rootRouteId);
   });
+
+  it("matches dedicated auth and public utility routes", () => {
+    const router = createRouter({ routeTree, context: { queryClient: new QueryClient() } });
+
+    expect(router.matchRoutes("/login").at(-1)?.routeId).toBe("/login");
+    expect(router.matchRoutes("/recovery").at(-1)?.routeId).toBe("/recovery");
+    expect(router.matchRoutes("/reset-password").at(-1)?.routeId).toBe("/reset-password");
+    expect(router.matchRoutes("/unauthorized").at(-1)?.routeId).toBe("/unauthorized");
+  });
+
+  it("matches each of the four role-based enclave console routes", () => {
+    const router = createRouter({ routeTree, context: { queryClient: new QueryClient() } });
+
+    const employeeMatches = router.matchRoutes("/enclave/employee");
+    expect(employeeMatches.some((m) => m.routeId.includes("employee"))).toBe(true);
+
+    const hrMatches = router.matchRoutes("/enclave/hr");
+    expect(hrMatches.some((m) => m.routeId.includes("hr"))).toBe(true);
+
+    const securityMatches = router.matchRoutes("/enclave/security");
+    expect(securityMatches.some((m) => m.routeId.includes("security"))).toBe(true);
+
+    const adminMatches = router.matchRoutes("/enclave/admin");
+    expect(adminMatches.some((m) => m.routeId.includes("admin"))).toBe(true);
+  });
 });

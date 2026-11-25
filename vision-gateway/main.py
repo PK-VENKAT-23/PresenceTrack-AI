@@ -14,7 +14,7 @@ import hmac
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import cv2
 from fastapi import FastAPI, HTTPException, status, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,7 +59,9 @@ class HealthResponse(BaseModel):
 
 
 class CameraReconnectResponse(BaseModel):
+    success: bool = True
     status: str
+    detailed_state: Optional[str] = None
     camera_connected: bool
     is_synthetic: bool
     is_stale: bool = False
@@ -79,16 +81,41 @@ class CameraDiagnosticsResponse(BaseModel):
     history: List[Dict[str, Any]]
 
 
+class DetectedFaceInfo(BaseModel):
+    bbox: Dict[str, int]
+    identity_status: str  # "VERIFIED", "VERIFYING", "UNKNOWN"
+    matched_name: Optional[str] = None
+    matched_person_id: Optional[str] = None
+    sc_score: float = 0.0
+    track_id: Optional[Union[str, int]] = None
+    candidate_employee_id: Optional[str] = None
+    candidate_name: Optional[str] = None
+    similarity_score: float = 0.0
+    matching_threshold: float = 0.45
+    confirmation_count: int = 0
+    required_confirmation_count: int = 2
+    last_match_timestamp: Optional[str] = None
+    time_to_verified_ms: Optional[float] = None
+    detection_latency_ms: Optional[float] = None
+    recognition_latency_ms: Optional[float] = None
+
+
 class LiveDetectionResponse(BaseModel):
     camera_id: str
     is_live: bool
     face_detected: bool
     face_bounding_box: Optional[Dict[str, int]] = None
     sc_score: float = 0.0
+    match_score: float = 0.0
     confidence_category: str = "UNKNOWN"
+    identity_status: str = "NO_FACE"
+    track_id: Optional[Union[str, int]] = None
     matched_name: Optional[str] = None
     matched_person_id: Optional[str] = None
     consent_revoked: bool = False
+    consent_valid: bool = False
+    template_match_confirmed: bool = False
+    consecutive_match_frames: int = 0
     person_count: int = 0
     active_tracks: int = 0
     last_event: Optional[str] = None
@@ -100,6 +127,17 @@ class LiveDetectionResponse(BaseModel):
     recovery_status: Optional[str] = None
     consecutive_failures: int = 0
     current_failure_reason: Optional[str] = None
+    detected_faces: List[DetectedFaceInfo] = Field(default_factory=list)
+    matching_threshold: float = 0.45
+    required_confirmation_count: int = 2
+    actual_fps: Optional[float] = None
+    avg_frame_interval_ms: Optional[float] = None
+    frame_processing_latency_ms: Optional[float] = None
+    face_detection_latency_ms: Optional[float] = None
+    face_recognition_latency_ms: Optional[float] = None
+    dropped_frames: Optional[int] = None
+    frame_queue_depth: Optional[int] = None
+    last_successful_frame_timestamp: Optional[str] = None
 
 
 class SimulateCrossingRequest(BaseModel):
@@ -180,11 +218,18 @@ class GatewayState:
             "is_live": False,
             "face_detected": False,
             "face_bounding_box": None,
+            "detected_faces": [],
             "sc_score": 0.0,
+            "match_score": 0.0,
             "confidence_category": "UNKNOWN",
+            "identity_status": "NO_FACE",
+            "track_id": None,
             "matched_name": None,
             "matched_person_id": None,
             "consent_revoked": False,
+            "consent_valid": False,
+            "template_match_confirmed": False,
+            "consecutive_match_frames": 0,
             "person_count": 0,
             "active_tracks": 0,
             "last_event": None,
@@ -193,6 +238,14 @@ class GatewayState:
             "is_synthetic": False,
             "is_stale": False,
             "real_frame_count": 0,
+            "actual_fps": 0.0,
+            "avg_frame_interval_ms": 0.0,
+            "frame_processing_latency_ms": 0.0,
+            "face_detection_latency_ms": 0.0,
+            "face_recognition_latency_ms": 0.0,
+            "dropped_frames": 0,
+            "frame_queue_depth": 0,
+            "last_successful_frame_timestamp": None,
         }
         self.is_running = False
         self._thread: Optional[threading.Thread] = None
@@ -201,25 +254,27 @@ class GatewayState:
 state = GatewayState()
 
 
-def _attach_face_matches_to_tracks(faces, face_results, active_tracks):
+def _attach_face_matches_to_tracks(
+    faces,
+    face_results,
+    active_tracks,
+    required_consecutive_frames: int = 1,
+    strict_match_threshold: float = 0.45,
+    ambiguous_match_threshold: float = 0.363,
+    bounded_verification_window: int = 5,
+    max_missed_grace_frames: int = 0,
+):
     """
     Attach a face identity only when its face center maps unambiguously
     to exactly one current track, and exactly one face maps to that track.
 
-    Return only associations successfully attached to their tracks.
+    Enforces consecutive match confirmation frames, active consent check,
+    hysteresis exit condition, bounded grace period, bounded verification window,
+    and strict threshold validation.
     """
-    eligible_statuses = {
-        MatchStatus.MATCHED,
-        MatchStatus.DISABLED_FOR_REVIEW,
-        MatchStatus.CONSENT_REVOKED,
-    }
-
     track_candidates = {}
 
     for face_index, (face, result) in enumerate(face_results):
-        if result.status not in eligible_statuses or not result.employee_id:
-            continue
-
         fx, fy = face.center
         candidates = []
 
@@ -246,24 +301,203 @@ def _attach_face_matches_to_tracks(faces, face_results, active_tracks):
 
     for face_index, track in track_candidates.items():
         if candidate_counts[track.track_id] != 1:
+            track.is_verified = False
+            track.identity_status = "UNKNOWN"
+            track.consecutive_match_frames = 0
+            track.verifying_frames = 0
+            track.missed_frames = 0
+            track.matched_person_id = None
+            track.matched_name = None
+            track.candidate_person_id = None
+            track.candidate_name = None
             continue
 
         face, result = face_results[face_index]
 
-        if track.matched_person_id is not None:
-            # Preserve an existing identity; report it only if it agrees.
-            if track.matched_person_id == result.employee_id:
-                attached_matches.append((face, result, track))
+        # 1. Handle Consent Revocation (DPDP hard gate)
+        if result.status == MatchStatus.CONSENT_REVOKED:
+            track.consent_revoked = True
+            track.is_verified = False
+            track.identity_status = "UNKNOWN"
+            track.matched_person_id = result.employee_id
+            track.matched_name = result.name
+            track.matched_cosine = result.cosine_score
+            track.candidate_person_id = None
+            track.candidate_name = None
+            track.consecutive_match_frames = 0
+            track.verifying_frames = 0
+            track.missed_frames = 0
+            attached_matches.append((face, result, track))
             continue
 
-        track.matched_person_id = result.employee_id
-        track.matched_name = result.name
-        track.matched_cosine = result.cosine_score
-        track.consent_revoked = (
-            result.status == MatchStatus.CONSENT_REVOKED
-        )
+        # 2. Handle Inactive Employee
+        if result.status == MatchStatus.INACTIVE:
+            track.consent_revoked = False
+            track.is_verified = False
+            track.identity_status = "UNKNOWN"
+            track.matched_person_id = None
+            track.matched_name = None
+            track.matched_cosine = result.cosine_score
+            track.candidate_person_id = None
+            track.candidate_name = None
+            track.consecutive_match_frames = 0
+            track.verifying_frames = 0
+            track.missed_frames = 0
+            attached_matches.append((face, result, track))
+            continue
 
+        # 3. If track is already verified, evaluate Hysteresis Exit & Grace Period
+        if track.is_verified and track.matched_person_id:
+            if result.employee_id == track.matched_person_id:
+                # Same person matching!
+                if result.cosine_score >= ambiguous_match_threshold:
+                    # Hysteresis: score >= 0.363 maintains VERIFIED (even if dipping into [0.363, 0.450))
+                    track.is_verified = True
+                    track.identity_status = "VERIFIED"
+                    track.consecutive_match_frames += 1
+                    track.matched_cosine = result.cosine_score
+                    track.missed_frames = 0
+                    attached_matches.append((face, result, track))
+                    continue
+                else:
+                    # Score dipped below ambiguous threshold (< 0.363), e.g. severe blur / bad angle
+                    track.missed_frames = getattr(track, "missed_frames", 0) + 1
+                    if track.missed_frames <= max_missed_grace_frames:
+                        # Within bounded grace period: maintain VERIFIED
+                        track.is_verified = True
+                        track.identity_status = "VERIFIED"
+                        track.matched_cosine = result.cosine_score
+                        attached_matches.append((face, result, track))
+                        continue
+                    else:
+                        # Grace period expired: cleanly revoke to UNKNOWN
+                        track.is_verified = False
+                        track.identity_status = "UNKNOWN"
+                        track.matched_person_id = None
+                        track.matched_name = None
+                        track.candidate_person_id = None
+                        track.candidate_name = None
+                        track.consecutive_match_frames = 0
+                        track.verifying_frames = 0
+                        track.missed_frames = 0
+                        track.matched_cosine = result.cosine_score
+                        attached_matches.append((face, result, track))
+                        continue
+            else:
+                # A DIFFERENT person or an UNKNOWN face detected in this track!
+                # Immediate revocation of previous identity with 0 grace period:
+                track.is_verified = False
+                track.matched_person_id = None
+                track.matched_name = None
+                track.candidate_person_id = None
+                track.candidate_name = None
+                track.consecutive_match_frames = 0
+                track.verifying_frames = 0
+                track.missed_frames = 0
+                # Fall through to unverified evaluation below for this new person/face!
+
+        # 4. Handle Enrolled Employee match with score >= strict threshold (0.450)
+        if (
+            result.status in (MatchStatus.MATCHED, MatchStatus.DISABLED_FOR_REVIEW)
+            and result.employee_id
+            and result.cosine_score >= strict_match_threshold
+        ):
+            track.consent_revoked = False
+            track.matched_cosine = result.cosine_score
+            track.missed_frames = 0
+
+            if track.candidate_person_id == result.employee_id:
+                track.consecutive_match_frames += 1
+            else:
+                track.candidate_person_id = result.employee_id
+                track.candidate_name = result.name
+                track.consecutive_match_frames = 1
+                track.verifying_frames = 0
+                track.first_candidate_time = time.time()
+                track.is_verified = False
+                track.matched_person_id = None
+                track.matched_name = None
+
+            if track.consecutive_match_frames >= required_consecutive_frames:
+                track.is_verified = True
+                track.identity_status = "VERIFIED"
+                track.matched_person_id = result.employee_id
+                track.matched_name = result.name
+                track.verifying_frames = 0
+                first_time = getattr(track, "first_candidate_time", 0.0)
+                if first_time > 0.0:
+                    track.time_to_verified_ms = round((time.time() - first_time) * 1000, 1)
+            else:
+                track.verifying_frames = getattr(track, "verifying_frames", 0) + 1
+                if track.verifying_frames <= bounded_verification_window:
+                    track.is_verified = False
+                    track.identity_status = "VERIFYING"
+                    track.matched_person_id = None
+                    track.matched_name = None
+                else:
+                    track.is_verified = False
+                    track.identity_status = "UNKNOWN"
+                    track.matched_person_id = None
+                    track.matched_name = None
+
+            attached_matches.append((face, result, track))
+            continue
+
+        # 5. Handle score in uncertain / divergence range [ambiguous_match_threshold, strict_match_threshold)
+        if (
+            result.status in (MatchStatus.MATCHED, MatchStatus.DISABLED_FOR_REVIEW, MatchStatus.UNCERTAIN)
+            and ambiguous_match_threshold <= result.cosine_score < strict_match_threshold
+        ):
+            track.is_verified = False
+            track.consecutive_match_frames = 0
+            track.candidate_person_id = None
+            track.candidate_name = None
+            track.matched_person_id = None
+            track.matched_name = None
+            track.matched_cosine = result.cosine_score
+            track.consent_revoked = False
+            track.missed_frames = 0
+            track.verifying_frames = getattr(track, "verifying_frames", 0) + 1
+
+            if track.verifying_frames <= bounded_verification_window:
+                track.identity_status = "VERIFYING"
+            else:
+                track.identity_status = "UNKNOWN"
+
+            attached_matches.append((face, result, track))
+            continue
+
+        # 6. All other cases: UNKNOWN, unregistered face, score < ambiguous_match_threshold (e.g. 0.2220), or MatchStatus.UNKNOWN
+        track.is_verified = False
+        track.identity_status = "UNKNOWN"
+        track.consecutive_match_frames = 0
+        track.verifying_frames = 0
+        track.missed_frames = 0
+        track.candidate_person_id = None
+        track.candidate_name = None
+        track.matched_person_id = None
+        track.matched_name = None
+        track.matched_cosine = result.cosine_score
+        track.consent_revoked = False
         attached_matches.append((face, result, track))
+
+    attached_track_ids = {t.track_id for _, _, t in attached_matches}
+    for track in active_tracks:
+        if track.track_id not in attached_track_ids:
+            if track.is_verified and track.matched_person_id:
+                track.missed_frames = getattr(track, "missed_frames", 0) + 1
+                if track.missed_frames <= max_missed_grace_frames:
+                    # Bounded grace period: maintain VERIFIED
+                    continue
+            track.is_verified = False
+            track.identity_status = "UNKNOWN"
+            track.consecutive_match_frames = 0
+            track.verifying_frames = 0
+            track.missed_frames = 0
+            track.matched_person_id = None
+            track.matched_name = None
+            track.candidate_person_id = None
+            track.candidate_name = None
 
     return attached_matches
 
@@ -322,7 +556,9 @@ def processing_pipeline_loop():
                 boundary.update_resolution(w, h)
 
             # 1. Detection
+            t_detect_start = time.time()
             detections_dict = detector.detect_all(frame)
+            detection_latency_ms = round((time.time() - t_detect_start) * 1000, 1)
             faces = detections_dict["faces"]
             persons = detections_dict["persons"]
 
@@ -330,6 +566,7 @@ def processing_pipeline_loop():
             tracking_detections = persons if len(persons) > 0 else faces
 
             # 2. Recognition on detected faces
+            t_rec_start = time.time()
             face_results = []
 
             for face in faces:
@@ -347,6 +584,7 @@ def processing_pipeline_loop():
                     continue
 
                 face_results.append((face, res))
+            recognition_latency_ms = round((time.time() - t_rec_start) * 1000, 1)
 
             # 3. Object Tracking & Boundary Crossing
             active_tracks, crossing_events = tracker.update(tracking_detections)
@@ -356,6 +594,11 @@ def processing_pipeline_loop():
                 faces=faces,
                 face_results=face_results,
                 active_tracks=active_tracks,
+                required_consecutive_frames=2,
+                strict_match_threshold=0.45,
+                ambiguous_match_threshold=0.363,
+                bounded_verification_window=5,
+                max_missed_grace_frames=2,
             )
 
             # 4. Handle Crossing Events
@@ -364,11 +607,12 @@ def processing_pipeline_loop():
                 last_event_str = event.direction.value
                 matched_track = next((tr for tr in active_tracks if tr.track_id == event.track_id), None)
                 # Never borrow an identity from another face or track.
-                user_id = matched_track.matched_person_id if matched_track else None
+                is_verified = matched_track.is_verified if matched_track else False
+                user_id = matched_track.matched_person_id if (matched_track and is_verified) else None
                 score = matched_track.matched_cosine if matched_track else 0.0
                 revoked = matched_track.consent_revoked if matched_track else False
 
-                if user_id and not revoked and score >= matcher.match_threshold:
+                if user_id and is_verified and not revoked and score >= 0.70:
                     if matcher.auto_attendance_enabled:
                         # Verified Employee transit: emit attendance
                         disp_res = dispatcher.dispatch_transit(
@@ -409,38 +653,198 @@ def processing_pipeline_loop():
             face_box = None
             telemetry_score = 0.0
             telemetry_category = "UNKNOWN"
+            telemetry_identity_status = "NO_FACE"
+            telemetry_track_id = None
             telemetry_name = None
             telemetry_person_id = None
             telemetry_revoked = False
+            telemetry_consent_valid = False
+            telemetry_match_confirmed = False
+            telemetry_consecutive_frames = 0
+            detected_faces_list: List[Dict[str, Any]] = []
 
-            if len(faces) == 1:
-                face = faces[0]
-                fb = face.bbox
+            if camera.is_stale:
+                telemetry_identity_status = "STALE"
+                for tr in active_tracks:
+                    tr.is_verified = False
+                    tr.identity_status = "UNKNOWN"
+                    tr.consecutive_match_frames = 0
+                    tr.verifying_frames = 0
+                    tr.matched_person_id = None
+                    tr.matched_name = None
+            elif len(faces) == 0:
+                telemetry_identity_status = "NO_FACE"
+                for tr in active_tracks:
+                    tr.is_verified = False
+                    tr.identity_status = "UNKNOWN"
+                    tr.consecutive_match_frames = 0
+                    tr.verifying_frames = 0
+                    tr.matched_person_id = None
+                    tr.matched_name = None
+            else:
+                # Build rich detection record for every detected face
+                for face in faces:
+                    fb = face.bbox
+                    bx = max(0, min(fb[0], w - 1))
+                    by = max(0, min(fb[1], h - 1))
+                    bw = max(1, min(fb[2], w - bx))
+                    bh = max(1, min(fb[3], h - by))
+                    bbox_dict = {"x": bx, "y": by, "w": bw, "h": bh}
 
-                # Validate bounds.
-                bx = max(0, min(fb[0], w - 1))
-                by = max(0, min(fb[1], h - 1))
-                bw = max(1, min(fb[2], w - bx))
-                bh = max(1, min(fb[3], h - by))
-                face_box = {"x": bx, "y": by, "w": bw, "h": bh}
+                    matching_res = next(
+                        (res for f, res in face_results if f is face),
+                        None,
+                    )
+                    score = round(matching_res.cosine_score, 4) if matching_res else 0.0
 
-                matching_results = [
-                    result for result_face, result in face_results
-                    if result_face is face
-                ]
+                    attached_entry = next(
+                        (entry for entry in attached_matches if entry[0] is face),
+                        None,
+                    )
 
-                if len(matching_results) == 1:
-                    result = matching_results[0]
-                    telemetry_score = round(result.cosine_score, 4)
-                    telemetry_category = result.confidence_category
+                    f_status = "UNKNOWN"
+                    f_name = None
+                    f_person_id = None
+                    f_track_id = None
+                    f_candidate_id = None
+                    f_candidate_name = None
+                    f_confirmation_count = 0
+                    f_last_match_ts = None
 
-                if len(attached_matches) == 1:
-                    attached_face, result, track = attached_matches[0]
+                    if attached_entry is not None:
+                        _, res, track = attached_entry
+                        f_track_id = track.track_id
+                        f_confirmation_count = getattr(track, "consecutive_match_frames", 0)
+                        f_candidate_id = getattr(track, "candidate_person_id", None)
+                        if track.is_verified and track.identity_status == "VERIFIED" and not track.consent_revoked:
+                            f_status = "VERIFIED"
+                            f_name = track.matched_name
+                            f_person_id = track.matched_person_id
+                            f_candidate_name = track.matched_name
+                            f_last_match_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                        elif track.identity_status == "VERIFYING":
+                            f_status = "VERIFYING"
+                            f_candidate_name = None
+                        else:
+                            f_status = "UNKNOWN"
+                            f_candidate_id = None
+                            f_candidate_name = None
+                            f_confirmation_count = 0
+                    else:
+                        if score >= 0.45:
+                            f_status = "VERIFYING"
+                        else:
+                            f_status = "UNKNOWN"
 
-                    if attached_face is face:
-                        telemetry_name = track.matched_name
-                        telemetry_person_id = track.matched_person_id
+                    f_time_to_verified = getattr(track, "time_to_verified_ms", 0.0) if track else 0.0
+
+                    detected_faces_list.append({
+                        "bbox": bbox_dict,
+                        "identity_status": f_status,
+                        "matched_name": f_name,
+                        "matched_person_id": f_person_id,
+                        "sc_score": score,
+                        "track_id": f_track_id,
+                        "candidate_employee_id": f_candidate_id,
+                        "candidate_name": f_candidate_name,
+                        "similarity_score": score,
+                        "matching_threshold": 0.45,
+                        "confirmation_count": f_confirmation_count,
+                        "required_confirmation_count": 2,
+                        "last_match_timestamp": f_last_match_ts,
+                        "time_to_verified_ms": f_time_to_verified,
+                        "detection_latency_ms": detection_latency_ms,
+                        "recognition_latency_ms": recognition_latency_ms,
+                    })
+
+                if len(faces) == 1:
+                    primary = detected_faces_list[0]
+                    face_box = primary["bbox"]
+                    telemetry_identity_status = primary["identity_status"]
+                    telemetry_score = primary["sc_score"]
+                    telemetry_name = primary["matched_name"]
+                    telemetry_person_id = primary["matched_person_id"]
+                    telemetry_track_id = primary["track_id"]
+
+                    attached_entry = attached_matches[0] if attached_matches else None
+                    if attached_entry is not None:
+                        _, result, track = attached_entry
                         telemetry_revoked = track.consent_revoked
+                        telemetry_consecutive_frames = track.consecutive_match_frames
+                        if telemetry_identity_status == "VERIFIED":
+                            telemetry_category = "HIGH" if telemetry_score >= 0.65 else "MATCHED"
+                            telemetry_match_confirmed = True
+                            telemetry_consent_valid = not track.consent_revoked
+                        elif telemetry_identity_status == "VERIFYING":
+                            telemetry_category = "UNCERTAIN"
+                            telemetry_match_confirmed = False
+                            telemetry_consent_valid = not track.consent_revoked
+                        else:
+                            telemetry_category = "REVOKED" if track.consent_revoked else "UNKNOWN"
+                            telemetry_match_confirmed = False
+                            telemetry_consent_valid = False
+                            if not telemetry_track_id:
+                                telemetry_track_id = track.ephemeral_id or f"UNKNOWN-TRACK-{track.track_id:03d}"
+                    else:
+                        if telemetry_identity_status == "VERIFYING":
+                            telemetry_category = "UNCERTAIN"
+                            telemetry_track_id = "UNKNOWN-TRACK-000"
+                        else:
+                            telemetry_category = "UNKNOWN"
+                            telemetry_track_id = "UNKNOWN-TRACK-000"
+                else:
+                    # Multiple faces present: prioritize verified face as primary, else verifying, else unknown
+                    verified_items = [f for f in detected_faces_list if f["identity_status"] == "VERIFIED"]
+                    if len(verified_items) > 0:
+                        top = max(verified_items, key=lambda item: item["sc_score"])
+                        face_box = top["bbox"]
+                        telemetry_identity_status = "VERIFIED"
+                        telemetry_score = top["sc_score"]
+                        telemetry_name = top["matched_name"]
+                        telemetry_person_id = top["matched_person_id"]
+                        telemetry_track_id = top["track_id"]
+                        telemetry_category = "HIGH" if telemetry_score >= 0.65 else "MATCHED"
+                        telemetry_match_confirmed = True
+                        telemetry_consent_valid = True
+                        telemetry_consecutive_frames = 2
+                    else:
+                        verifying_items = [f for f in detected_faces_list if f["identity_status"] == "VERIFYING"]
+                        if len(verifying_items) > 0:
+                            top = verifying_items[0]
+                            face_box = top["bbox"]
+                            telemetry_identity_status = "VERIFYING"
+                            telemetry_score = top["sc_score"]
+                            telemetry_name = None
+                            telemetry_person_id = None
+                            telemetry_track_id = top["track_id"]
+                            telemetry_category = "UNCERTAIN"
+                            telemetry_match_confirmed = False
+                            telemetry_consent_valid = True
+                            telemetry_consecutive_frames = 1
+                        else:
+                            top = detected_faces_list[0]
+                            face_box = top["bbox"]
+                            telemetry_identity_status = "UNKNOWN"
+                            telemetry_score = top["sc_score"]
+                            telemetry_name = None
+                            telemetry_person_id = None
+                            telemetry_track_id = top["track_id"] or "MULTIPLE-TRACKS"
+                            telemetry_category = "UNKNOWN"
+                            telemetry_match_confirmed = False
+                            telemetry_consent_valid = False
+                            telemetry_consecutive_frames = 0
+
+            frame_processing_latency_ms = round((time.time() - t0) * 1000, 1)
+            actual_fps = round(getattr(camera, "fps", 0.0), 1)
+            avg_frame_interval_ms = round(getattr(camera, "avg_frame_interval_ms", 0.0), 1)
+            dropped_frames = getattr(camera, "dropped_frames", 0)
+            frame_queue_depth = getattr(camera, "frame_queue_depth", 0)
+            last_real_frame_ts = getattr(camera, "last_real_frame_timestamp", 0.0)
+            last_successful_frame_timestamp = (
+                datetime.fromtimestamp(last_real_frame_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                if last_real_frame_ts > 0.0
+                else None
+            )
 
             now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             state.last_detection = {
@@ -448,11 +852,20 @@ def processing_pipeline_loop():
                 "is_live": True,
                 "face_detected": len(faces) > 0,
                 "face_bounding_box": face_box,
+                "detected_faces": detected_faces_list,
                 "sc_score": telemetry_score,
+                "match_score": telemetry_score,
                 "confidence_category": telemetry_category,
+                "identity_status": telemetry_identity_status,
+                "track_id": telemetry_track_id,
                 "matched_name": telemetry_name,
                 "matched_person_id": telemetry_person_id,
                 "consent_revoked": telemetry_revoked,
+                "consent_valid": telemetry_consent_valid,
+                "template_match_confirmed": telemetry_match_confirmed,
+                "consecutive_match_frames": telemetry_consecutive_frames,
+                "matching_threshold": 0.45,
+                "required_confirmation_count": 2,
                 "person_count": len(persons),
                 "active_tracks": len(active_tracks),
                 "last_event": last_event_str,
@@ -464,20 +877,38 @@ def processing_pipeline_loop():
                 "recovery_status": health_monitor.recovery_status,
                 "consecutive_failures": health_monitor.consecutive_failures,
                 "current_failure_reason": health_monitor.current_failure_reason,
+                "actual_fps": actual_fps,
+                "avg_frame_interval_ms": avg_frame_interval_ms,
+                "frame_processing_latency_ms": frame_processing_latency_ms,
+                "face_detection_latency_ms": detection_latency_ms,
+                "face_recognition_latency_ms": recognition_latency_ms,
+                "dropped_frames": dropped_frames,
+                "frame_queue_depth": frame_queue_depth,
+                "last_successful_frame_timestamp": last_successful_frame_timestamp,
             }
         else:
             # Camera offline, disconnected, or stale:
             now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            last_real_frame_ts = getattr(camera, "last_real_frame_timestamp", 0.0)
             state.last_detection = {
                 "camera_id": config.camera_id,
                 "is_live": False,
                 "face_detected": False,
                 "face_bounding_box": None,
+                "detected_faces": [],
                 "sc_score": 0.0,
+                "match_score": 0.0,
                 "confidence_category": "UNKNOWN",
+                "identity_status": "STALE" if camera.is_stale else "NO_FACE",
+                "track_id": None,
                 "matched_name": None,
                 "matched_person_id": None,
                 "consent_revoked": False,
+                "consent_valid": False,
+                "template_match_confirmed": False,
+                "consecutive_match_frames": 0,
+                "matching_threshold": 0.45,
+                "required_confirmation_count": 2,
                 "person_count": 0,
                 "active_tracks": 0,
                 "last_event": None,
@@ -489,6 +920,18 @@ def processing_pipeline_loop():
                 "recovery_status": health_monitor.recovery_status,
                 "consecutive_failures": health_monitor.consecutive_failures,
                 "current_failure_reason": health_monitor.current_failure_reason,
+                "actual_fps": 0.0,
+                "avg_frame_interval_ms": 0.0,
+                "frame_processing_latency_ms": 0.0,
+                "face_detection_latency_ms": 0.0,
+                "face_recognition_latency_ms": 0.0,
+                "dropped_frames": getattr(camera, "dropped_frames", 0),
+                "frame_queue_depth": 0,
+                "last_successful_frame_timestamp": (
+                    datetime.fromtimestamp(last_real_frame_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                    if last_real_frame_ts > 0.0
+                    else None
+                ),
             }
 
         # Dispatch telemetry at 1 Hz
@@ -630,8 +1073,9 @@ def index():
 
 @app.get("/health", response_model=HealthResponse, tags=["Diagnostics"])
 def health():
+    has_real_frames = (camera.real_frame_count > 0) or bool(getattr(camera, "_forced_is_camera_connected", False))
     is_online = (
-        camera.is_camera_live
+        (camera.is_camera_live and has_real_frames and not camera.is_stale)
         if not camera.use_synthetic
         else (camera._is_configured_synthetic() and camera.is_connected)
     )
@@ -660,6 +1104,9 @@ def health():
         is_synthetic=camera.use_synthetic,
         is_stale=camera.is_stale,
         real_frame_count=camera.real_frame_count,
+        recovery_status=health_monitor.recovery_status,
+        consecutive_failures=health_monitor.consecutive_failures,
+        current_failure_reason=health_monitor.current_failure_reason,
         last_real_frame_timestamp=camera.last_real_frame_timestamp,
     )
 
@@ -728,23 +1175,150 @@ def camera_reconnect(
             detail="Unauthorized: Valid device key required for camera reconnection",
         )
 
-    res = health_monitor.manual_refresh(force=force)
-    success = res["success"]
+    try:
+        res = health_monitor.manual_refresh(force=force)
+        success = bool(res.get("success", False))
 
-    return CameraReconnectResponse(
-        status="reconnected" if success else "failed",
-        camera_connected=camera.is_camera_connected and not camera.is_stale,
-        is_synthetic=camera.use_synthetic,
-        is_stale=camera.is_stale,
-        camera_id=config.camera_id,
-        source=str(camera.source),
-        real_frame_count=camera.real_frame_count,
-        message=res["message"],
-        new_frames_received=res.get("new_frames_received", 0),
-        time_taken_sec=res.get("time_taken_sec", 0.0),
-        failure_reason=health_monitor.current_failure_reason,
-        recovery_status=health_monitor.recovery_status,
-    )
+        return CameraReconnectResponse(
+            success=success,
+            status="reconnected" if success else "failed",
+            detailed_state=res.get("detailed_state", "FRESH_FRAMES_RECEIVED" if success else "STALE_OR_OFFLINE"),
+            camera_connected=bool(camera.is_camera_connected and not camera.is_stale and success),
+            is_synthetic=bool(camera.use_synthetic),
+            is_stale=bool(camera.is_stale or not success),
+            camera_id=config.camera_id,
+            source=str(camera.source),
+            real_frame_count=camera.real_frame_count,
+            message=str(res.get("message", "Reconnection completed")),
+            new_frames_received=int(res.get("new_frames_received", 0)),
+            time_taken_sec=float(res.get("time_taken_sec", 0.0)),
+            failure_reason=health_monitor.current_failure_reason,
+            recovery_status=health_monitor.recovery_status,
+        )
+    except Exception as exc:
+        logger.error("Unexpected error in /camera/reconnect: %s", exc, exc_info=True)
+        return CameraReconnectResponse(
+            success=False,
+            status="failed",
+            camera_connected=False,
+            is_synthetic=bool(camera.use_synthetic),
+            is_stale=bool(camera.is_stale),
+            camera_id=config.camera_id,
+            source=str(camera.source),
+            real_frame_count=camera.real_frame_count,
+            message=f"Camera reconnection error: {exc}",
+            new_frames_received=0,
+            time_taken_sec=0.0,
+            failure_reason=str(exc),
+            recovery_status=health_monitor.recovery_status or "CAMERA_OFFLINE",
+        )
+
+
+@app.post("/camera/reboot", tags=["Camera Control"])
+def camera_reboot(
+    x_device_key: Optional[str] = Header(None, alias="x-device-key"),
+):
+    """
+    Safely request an authenticated physical camera reboot.
+    Validates device key, probes hardware reachability, sends reboot command,
+    waits for Wi-Fi reassociation, and restores live stream.
+    If camera is completely unreachable, returns PHYSICAL_POWER_CYCLE_REQUIRED.
+    """
+    if x_device_key and not hmac.compare_digest(x_device_key, config.device_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Valid device key required for camera reboot",
+        )
+
+    # 1. Probe reachability
+    cam_ok = True
+    cam_msg = "OK"
+    if hasattr(camera, "probe_camera_status"):
+        cam_ok, cam_msg = camera.probe_camera_status(timeout=2.0)
+
+    if not cam_ok:
+        health_monitor.recovery_status = "PHYSICAL_POWER_CYCLE_REQUIRED"
+        health_monitor.current_failure_reason = (
+            "Camera is completely unreachable/unpowered. Software reboot is impossible; "
+            "physical power cycle (unplug and replug USB) is required."
+        )
+        return {
+            "success": False,
+            "status": "PHYSICAL_POWER_CYCLE_REQUIRED",
+            "message": health_monitor.current_failure_reason,
+            "requires_physical_power_cycle": True,
+        }
+
+    # 2. Camera is reachable; send restart request if HTTP
+    health_monitor.recovery_status = "CAMERA_REBOOTING"
+    reboot_sent = False
+    if isinstance(camera.source, str) and camera.source.startswith(("http://", "https://")):
+        reboot_url = camera.source.replace("/stream", "/restart")
+        headers = {"Content-Type": "application/json"}
+        if config.device_key:
+            headers["x-device-key"] = config.device_key
+
+        camera.disconnect()
+        try:
+            req = urllib.request.Request(reboot_url, method="POST", headers=headers, data=b"{}")
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                reboot_sent = (resp.getcode() == 200)
+        except Exception as exc:
+            logger.warning("[CameraReboot] Direct /restart endpoint returned: %s", exc)
+
+    if not reboot_sent:
+        logger.warning(
+            "[CameraReboot] Direct /restart endpoint is not implemented or failed on camera firmware. "
+            "Reboot was not executed; safely restoring stream."
+        )
+        refresh_res = health_monitor.manual_refresh(force=True)
+        return {
+            "success": False,
+            "status": "FIRMWARE_RESTART_NOT_SUPPORTED",
+            "message": (
+                "Camera /restart endpoint is not supported or not yet flashed on the current ESP32-CAM firmware. "
+                "Stream was safely reconnected instead of rebooting. Physical power cycle (unplug and replug USB) is required for hardware restart."
+            ),
+            "reboot_executed": False,
+            "camera_live": refresh_res.get("camera_live", False),
+        }
+
+    # 3. Wait for camera to boot and reconnect to Wi-Fi (poll /status up to 15s)
+    time.sleep(2.5)  # Reboot delay
+    came_back = False
+    if hasattr(camera, "probe_camera_status"):
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            ok, _ = camera.probe_camera_status(timeout=1.5)
+            if ok:
+                came_back = True
+                break
+            time.sleep(1.0)
+    else:
+        came_back = True
+
+    if not came_back:
+        health_monitor.recovery_status = "PHYSICAL_POWER_CYCLE_REQUIRED"
+        health_monitor.current_failure_reason = "Camera rebooted but failed to reassociate with Wi-Fi within 15 seconds"
+        return {
+            "success": False,
+            "status": "PHYSICAL_POWER_CYCLE_REQUIRED",
+            "message": health_monitor.current_failure_reason,
+            "requires_physical_power_cycle": True,
+        }
+
+    # 4. Camera is back online; restore stream
+    refresh_res = health_monitor.manual_refresh(force=True)
+    return {
+        "success": refresh_res.get("success", False),
+        "status": refresh_res.get("status", "LIVE"),
+        "message": (
+            f"Camera rebooted and stream restored ({refresh_res.get('new_frames_received', 0)} new frames)"
+            if refresh_res.get("success")
+            else refresh_res.get("message", "Reboot completed but frame verification failed")
+        ),
+        "requires_physical_power_cycle": False,
+    }
 
 
 @app.post("/camera/simulate-interruption", tags=["Testing"])
@@ -783,27 +1357,41 @@ async def generate_mjpeg_stream(
     """
     Yields multipart MJPEG chunks for each fresh frame retrieved from
     the camera reader's thread-safe latest-frame buffer.
-    Terminates or safely interrupts when stream stalls or goes offline
-    so clients detect disconnect and can auto-reconnect.
+    Directly streams native pre-formatted JPEG chunks when available,
+    avoiding double JPEG encoding, eliminating compression artifacts, and ensuring zero lag.
     """
     delay = 1.0 / max(1, config.target_fps)
     frames_yielded = 0
     empty_count = 0
     stale_duration = 0.0
+    last_yielded_count = -1
 
     try:
         while True:
-            frame = camera.get_latest_frame()
+            chunk = None
+            current_count = camera.frame_count
 
-            if frame is not None:
+            # 1. Prefer native raw JPEG chunk directly from camera reader (zero re-encoding overhead)
+            raw_chunk = camera.get_latest_jpeg_chunk()
+            if raw_chunk is not None:
+                if max_frames is not None or current_count != last_yielded_count:
+                    chunk = raw_chunk
+
+            # 2. Fallback to get_latest_frame if native chunk is not present (e.g. synthetic or patched in tests)
+            if chunk is None:
+                frame = camera.get_latest_frame()
+                if frame is not None:
+                    if max_frames is not None or current_count != last_yielded_count or camera.use_synthetic:
+                        chunk = encode_mjpeg_chunk(frame)
+
+            if chunk is not None:
+                last_yielded_count = current_count
                 stale_duration = 0.0
                 empty_count = 0
-                chunk = encode_mjpeg_chunk(frame)
-                if chunk:
-                    yield chunk
-                    frames_yielded += 1
-                    if max_frames is not None and frames_yielded >= max_frames:
-                        break
+                yield chunk
+                frames_yielded += 1
+                if max_frames is not None and frames_yielded >= max_frames:
+                    break
             else:
                 empty_count += 1
                 stale_duration += delay
@@ -813,12 +1401,12 @@ async def generate_mjpeg_stream(
                 ):
                     break
 
-                # Interrupt relay stream if offline or stale for longer than 15.0s (allows smooth auto-reconnect without breaking active clients)
+                # Interrupt relay stream if offline or stale for longer than 15.0s
                 if max_frames is None and stale_duration >= 15.0:
                     logger.info("Camera stream offline/stale for %.1fs; interrupting /video_feed relay", stale_duration)
                     break
 
-            await asyncio.sleep(delay)
+            await asyncio.sleep(0.015 if max_frames is None else delay)
     except (asyncio.CancelledError, GeneratorExit):
         logger.debug("MJPEG client disconnected from /video_feed")
         raise

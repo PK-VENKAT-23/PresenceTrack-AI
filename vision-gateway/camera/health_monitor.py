@@ -22,7 +22,9 @@ Provides:
 
 from collections import deque
 from datetime import datetime, timezone
+import errno
 import logging
+import os
 import socket
 import threading
 import time
@@ -155,7 +157,24 @@ class CameraHealthMonitor:
                 res = sock.connect_ex((host, port))
                 if res == 0:
                     return True, f"ESP32-CAM endpoint reachable on {host}:{port}"
-                return False, f"Connection to {host}:{port} failed (errno {res})"
+                # On Darwin, non-blocking connect_ex can return 35 (EAGAIN) or 36 (EINPROGRESS)
+                if res in (35, 36):
+                    try:
+                        sock.connect((host, port))
+                        return True, f"ESP32-CAM endpoint reachable on {host}:{port}"
+                    except socket.timeout:
+                        return False, f"Connection to {host}:{port} timed out after 1.5s"
+                    except OSError as exc:
+                        res = getattr(exc, "errno", res)
+
+                err_desc = ""
+                try:
+                    err_desc = os.strerror(res)
+                except Exception:
+                    err_desc = f"errno {res}"
+                if res in (65, 64, 50, 51):
+                    return False, f"Network route unreachable to {host}:{port} ({err_desc}, errno {res}) - verify Mac Wi-Fi / hotspot"
+                return False, f"Connection to {host}:{port} failed ({err_desc}, errno {res})"
             finally:
                 sock.close()
         except Exception as exc:
@@ -301,20 +320,19 @@ class CameraHealthMonitor:
 
         # Overall Status Determination
         is_camera_live = getattr(self.camera, "is_camera_live", False)
-        if is_camera_live and not is_stale and delta_real >= 0:
+        has_real_frames = (current_real_count > 0) or is_synthetic or bool(getattr(self.camera, "_forced_is_camera_connected", False))
+        if is_camera_live and not is_stale and has_real_frames and delta_real >= 0:
             overall_status = "LIVE"
             failure_reason = None
+            self.consecutive_failures = 0
         elif not net_ok:
-            overall_status = "CAMERA_OFFLINE"
+            overall_status = "RECOVERY_FAILED" if self.consecutive_failures >= self.max_recovery_failures else "CAMERA_OFFLINE"
             net_reasons = [r for r in failure_reasons if "Network unreachable" in r]
             failure_reason = net_reasons[0] if net_reasons else (failure_reasons[0] if failure_reasons else "ESP32 network connection failed")
         elif is_stale:
             overall_status = "STREAM_STALE"
             stale_reasons = [r for r in failure_reasons if "STALE" in r or "stale" in r]
             failure_reason = stale_reasons[0] if stale_reasons else (failure_reasons[0] if failure_reasons else "Camera stream is stale")
-        elif self.consecutive_failures >= self.max_recovery_failures:
-            overall_status = "CAMERA_OFFLINE"
-            failure_reason = failure_reasons[0] if failure_reasons else "ESP32 network connection failed"
         elif self.consecutive_failures >= self.max_recovery_failures:
             overall_status = "RECOVERY_FAILED"
             failure_reason = (
@@ -377,23 +395,25 @@ class CameraHealthMonitor:
 
         try:
             initial_real_frames = getattr(self.camera, "real_frame_count", 0)
+            is_synthetic = getattr(self.camera, "use_synthetic", False) or (
+                hasattr(self.camera, "_is_configured_synthetic") and self.camera._is_configured_synthetic()
+            )
 
-            # Safe reconnection of the stream reader
+            # 1. Reconnect camera transport
             success = self.camera.reconnect(force=True)
 
-            # Verification window: poll for real frame advancement (up to 3.0 seconds)
+            # 2. Verification window: poll for real frame advancement (up to 5.0 seconds)
+            self.recovery_status = "VERIFYING_FRESH_FRAMES"
             verified = False
             if success:
-                if getattr(self.camera, "use_synthetic", False) or (
-                    hasattr(self.camera, "_is_configured_synthetic") and self.camera._is_configured_synthetic()
-                ):
+                if is_synthetic:
                     verified = True
                 else:
-                    poll_deadline = time.time() + 3.0
+                    poll_deadline = time.time() + 5.0
                     while time.time() < poll_deadline:
                         time.sleep(0.1)
                         cur_real = getattr(self.camera, "real_frame_count", 0)
-                        if (cur_real > initial_real_frames or getattr(self.camera, "is_camera_live", False)) and not getattr(self.camera, "is_stale", False):
+                        if (cur_real > initial_real_frames) and not getattr(self.camera, "is_stale", False):
                             verified = True
                             break
 
@@ -429,15 +449,27 @@ class CameraHealthMonitor:
                 backoff = self.recovery_backoff_delay
                 self._next_allowed_recovery_time = time.time() + backoff
 
-                if self.consecutive_failures >= self.max_recovery_failures:
+                net_ok, net_msg = self.check_network_reachability()
+                is_net_route_error = (not net_ok) and any(
+                    w in net_msg for w in ("errno 65", "errno 50", "errno 51", "errno 64", "No route to host", "Network route unreachable")
+                )
+
+                if self.consecutive_failures >= 7 and not is_net_route_error:
+                    self.recovery_status = "PHYSICAL_POWER_CYCLE_REQUIRED"
+                    err_msg = (
+                        "Camera stream failed to restore real frames after multiple recovery attempts. "
+                        "Please physically power cycle (unplug and replug USB) the ESP32-CAM."
+                    )
+                elif self.consecutive_failures >= self.max_recovery_failures:
                     self.recovery_status = "RECOVERY_FAILED"
                     err_msg = (
                         f"Automatic recovery halted after {self.consecutive_failures} failed attempts: "
-                        f"Camera stream could not advance real frames. Manual intervention or Refresh Camera required."
+                        f"{'Camera subnet/route unreachable from Mac' if is_net_route_error else 'Camera stream could not advance real frames'}. "
+                        f"Ongoing background retries every {backoff:.1f}s or click Retry now."
                     )
                 else:
                     self.recovery_status = "CAMERA_OFFLINE"
-                    err_msg = f"Recovery attempt #{attempt_num} failed to restore real frames; retry in {backoff:.1f}s"
+                    err_msg = f"Recovery attempt #{attempt_num} failed: {net_msg if not net_ok else '0 fresh real frames'}; retry in {backoff:.1f}s"
 
                 self.current_failure_reason = err_msg
                 logger.warning("[CameraHealthMonitor] %s (took %.2fs)", err_msg, t_elapsed)
@@ -459,6 +491,12 @@ class CameraHealthMonitor:
             backoff = self.recovery_backoff_delay
             self._next_allowed_recovery_time = time.time() + backoff
             self.current_failure_reason = f"Exception during recovery: {type(exc).__name__}: {exc}"
+            if self.consecutive_failures >= 7:
+                self.recovery_status = "PHYSICAL_POWER_CYCLE_REQUIRED"
+            elif self.consecutive_failures >= self.max_recovery_failures:
+                self.recovery_status = "RECOVERY_FAILED"
+            else:
+                self.recovery_status = "CAMERA_OFFLINE"
 
             entry = DiagnosticEntry(
                 failure_category="RECOVERY_EXCEPTION",
@@ -475,9 +513,40 @@ class CameraHealthMonitor:
     def manual_refresh(self, force: bool = True) -> Dict[str, Any]:
         """
         Operator-triggered manual stream refresh.
-        Resets failure counters, triggers immediate safe reconnection,
+        Resets failure counters upon verified frame arrival, triggers immediate safe reconnection,
         and verifies that real frames advance before returning structured result.
         """
+        # Revive capture and watchdog threads if terminated
+        if hasattr(self.camera, "ensure_threads_running"):
+            try:
+                self.camera.ensure_threads_running()
+            except Exception as e:
+                logger.warning("[CameraHealthMonitor] Failed to revive reader threads: %s", e)
+
+        # Allow operator manual refresh to bypass background backoff wait
+        self._next_allowed_recovery_time = 0.0
+
+        # Step 1: Check network reachability before attempting reconnect
+        net_ok, net_msg = self.check_network_reachability()
+        is_net_route_error = (not net_ok) and any(
+            w in net_msg for w in ("errno 65", "errno 50", "errno 51", "errno 64", "No route to host", "Network route unreachable")
+        )
+        if not net_ok and is_net_route_error:
+            self.recovery_status = "CAMERA_OFFLINE"
+            self.current_failure_reason = f"Network unavailable: {net_msg}"
+            return {
+                "success": False,
+                "status": "CAMERA_OFFLINE",
+                "detailed_state": "NETWORK_UNAVAILABLE",
+                "camera_live": False,
+                "is_stale": True,
+                "real_frame_count": getattr(self.camera, "real_frame_count", 0),
+                "new_frames_received": 0,
+                "message": f"Network unavailable: {net_msg}",
+                "failure_reason": f"Network unavailable: {net_msg}",
+                "time_taken_sec": 0.0,
+            }
+
         acquired = self._recovery_lock.acquire(timeout=6.0)
         if not acquired:
             return {
@@ -486,31 +555,35 @@ class CameraHealthMonitor:
                 "message": "Another recovery or refresh operation is currently in progress",
                 "camera_live": getattr(self.camera, "is_camera_live", False),
                 "is_stale": getattr(self.camera, "is_stale", True),
+                "real_frame_count": getattr(self.camera, "real_frame_count", 0),
+                "new_frames_received": 0,
                 "time_taken_sec": 0.0,
             }
 
         t_start = time.time()
         self.recovery_status = "RECONNECTING"
         initial_real_frames = getattr(self.camera, "real_frame_count", 0)
+        is_synthetic = getattr(self.camera, "use_synthetic", False) or (
+            hasattr(self.camera, "_is_configured_synthetic") and self.camera._is_configured_synthetic()
+        )
 
         try:
             # Reconnect camera transport
             connected = self.camera.reconnect(force=force)
 
-            # Verification loop: wait up to 3.5s for real frames to advance
+            # Verification loop: wait up to 5.0s for genuinely new real frames to advance
+            self.recovery_status = "VERIFYING_FRESH_FRAMES"
             verified = False
             new_frames = 0
             if connected:
-                if getattr(self.camera, "use_synthetic", False) or (
-                    hasattr(self.camera, "_is_configured_synthetic") and self.camera._is_configured_synthetic()
-                ):
+                if is_synthetic:
                     verified = True
                 else:
-                    deadline = time.time() + 3.5
+                    deadline = time.time() + 5.0
                     while time.time() < deadline:
                         time.sleep(0.1)
                         cur_real = getattr(self.camera, "real_frame_count", 0)
-                        if (cur_real > initial_real_frames or getattr(self.camera, "is_camera_live", False)) and not getattr(self.camera, "is_stale", False):
+                        if (cur_real > initial_real_frames) and not getattr(self.camera, "is_stale", False):
                             verified = True
                             new_frames = max(0, cur_real - initial_real_frames)
                             break
@@ -526,8 +599,8 @@ class CameraHealthMonitor:
                 msg = f"Manual refresh succeeded: {new_frames} fresh frames verified in {t_elapsed:.2f}s"
 
                 entry = DiagnosticEntry(
-                    failure_category="MANUAL_REFRESH",
-                    error_details="Operator triggered refresh",
+                    failure_category="FRESH_FRAMES_RECEIVED",
+                    error_details="Operator triggered refresh with verified frame arrival",
                     recovery_action="RECONNECT_STREAM",
                     attempt_number=self.recovery_attempt_count + 1,
                     recovery_result="SUCCESS",
@@ -538,6 +611,7 @@ class CameraHealthMonitor:
                 return {
                     "success": True,
                     "status": "LIVE",
+                    "detailed_state": "FRESH_FRAMES_RECEIVED",
                     "camera_live": True,
                     "is_stale": False,
                     "real_frame_count": getattr(self.camera, "real_frame_count", 0),
@@ -547,12 +621,61 @@ class CameraHealthMonitor:
                 }
             else:
                 self.consecutive_failures += 1
-                self.recovery_status = "RECOVERY_FAILED" if self.consecutive_failures >= self.max_recovery_failures else "CAMERA_OFFLINE"
-                msg = f"Manual refresh completed but no fresh real frames were received from camera ({t_elapsed:.2f}s)"
+
+                # Probe hardware to distinguish reachability vs frame stall
+                cam_hw_ok = False
+                if hasattr(self.camera, "probe_camera_status"):
+                    try:
+                        probe_res = self.camera.probe_camera_status(timeout=1.5)
+                        if isinstance(probe_res, tuple) and len(probe_res) >= 1:
+                            cam_hw_ok = bool(probe_res[0])
+                    except Exception:
+                        cam_hw_ok = False
+
+                net_ok, net_msg = self.check_network_reachability()
+                is_net_route_error = (not net_ok) and any(
+                    w in net_msg for w in ("errno 65", "errno 50", "errno 51", "errno 64", "No route to host", "Network route unreachable")
+                )
+
+                if self.consecutive_failures >= 7 and not is_net_route_error:
+                    self.recovery_status = "PHYSICAL_POWER_CYCLE_REQUIRED"
+                    detailed_state = "PHYSICAL_POWER_CYCLE_REQUIRED"
+                    msg = (
+                        f"Manual refresh completed but 0 fresh real frames received ({t_elapsed:.2f}s). "
+                        "Repeated failures indicate hardware contention or crash; please power cycle the ESP32-CAM."
+                    )
+                elif cam_hw_ok:
+                    self.recovery_status = "STREAM_STALE"
+                    detailed_state = "CAMERA_REACHABLE"
+                    msg = (
+                        f"Camera hardware reachable at :81/status, but stream produced 0 fresh frames in 5.0s window ({t_elapsed:.2f}s). "
+                        "Stream is stale or decoder stalled."
+                    )
+                elif connected and getattr(self.camera, "is_connected", False):
+                    self.recovery_status = "STREAM_STALE"
+                    detailed_state = "STREAM_LIVE"
+                    msg = (
+                        f"TCP socket opened, but 0 fresh real frames advanced within 5.0s ({t_elapsed:.2f}s). "
+                        "Camera framebuffer acquisition stalled."
+                    )
+                elif not net_ok:
+                    self.recovery_status = "CAMERA_OFFLINE"
+                    detailed_state = "CAMERA_UNREACHABLE"
+                    msg = f"Manual refresh failed: Camera endpoint unreachable ({net_msg}) ({t_elapsed:.2f}s)"
+                elif self.consecutive_failures >= self.max_recovery_failures:
+                    self.recovery_status = "RECOVERY_FAILED"
+                    detailed_state = "STALE_OR_OFFLINE"
+                    msg = f"Manual refresh failed: Camera is offline ({net_msg if not net_ok else '0 fresh frames'}) ({t_elapsed:.2f}s)"
+                else:
+                    self.recovery_status = "CAMERA_OFFLINE"
+                    detailed_state = "STALE_OR_OFFLINE"
+                    msg = f"Manual refresh completed but no fresh real frames were received ({net_msg if not net_ok else '0 fresh frames'}) ({t_elapsed:.2f}s)"
+
                 self.current_failure_reason = msg
+                self._next_allowed_recovery_time = time.time() + self.recovery_backoff_delay
 
                 entry = DiagnosticEntry(
-                    failure_category="MANUAL_REFRESH",
+                    failure_category=detailed_state,
                     error_details=msg,
                     recovery_action="RECONNECT_STREAM",
                     attempt_number=self.recovery_attempt_count + 1,
@@ -564,13 +687,43 @@ class CameraHealthMonitor:
                 return {
                     "success": False,
                     "status": self.recovery_status,
+                    "detailed_state": detailed_state,
                     "camera_live": False,
-                    "is_stale": getattr(self.camera, "is_stale", True),
+                    "is_stale": True,
                     "real_frame_count": getattr(self.camera, "real_frame_count", 0),
                     "new_frames_received": 0,
                     "message": msg,
+                    "failure_reason": msg,
                     "time_taken_sec": round(t_elapsed, 3),
                 }
+        except Exception as exc:
+            t_elapsed = time.time() - t_start
+            self.consecutive_failures += 1
+            self.recovery_status = "RECOVERY_FAILED" if self.consecutive_failures >= self.max_recovery_failures else "CAMERA_OFFLINE"
+            msg = f"Manual refresh error: {type(exc).__name__}: {exc}"
+            self.current_failure_reason = msg
+            self._next_allowed_recovery_time = time.time() + self.recovery_backoff_delay
+
+            entry = DiagnosticEntry(
+                failure_category="MANUAL_REFRESH_EXCEPTION",
+                error_details=str(exc),
+                recovery_action="RECONNECT_STREAM",
+                attempt_number=self.recovery_attempt_count + 1,
+                recovery_result="FAILED",
+                time_taken_sec=t_elapsed,
+            )
+            self._history.append(entry)
+
+            return {
+                "success": False,
+                "status": self.recovery_status,
+                "camera_live": False,
+                "is_stale": getattr(self.camera, "is_stale", True),
+                "real_frame_count": getattr(self.camera, "real_frame_count", 0),
+                "new_frames_received": 0,
+                "message": msg,
+                "time_taken_sec": round(t_elapsed, 3),
+            }
         finally:
             self._recovery_lock.release()
 
@@ -599,6 +752,8 @@ class CameraHealthMonitor:
 
                 if is_live and not is_stale:
                     self._consecutive_failed_checks = 0
+                    self.consecutive_failures = 0
+                    self.current_failure_reason = None
                     if self.recovery_status != "LIVE":
                         self.recovery_status = "LIVE"
                 else:
@@ -612,7 +767,8 @@ class CameraHealthMonitor:
                     # Multi-check failure confirmation (2 consecutive failed checks = ~30s or confirmed stale)
                     # To prevent hair-trigger reboots on brief transient network jitter
                     if self._consecutive_failed_checks >= 2 or is_stale:
-                        if self.consecutive_failures < self.max_recovery_failures:
+                        now_check = time.time()
+                        if now_check >= self._next_allowed_recovery_time:
                             self._attempt_automatic_recovery(
                                 diag.get("current_failure_reason") or "Stream unhealthy after confirmation checks"
                             )

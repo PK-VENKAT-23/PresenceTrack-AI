@@ -19,7 +19,7 @@ import type { Database } from "@/integrations/supabase/types";
 async function getCallerEnterpriseProfile(supabase: SupabaseClient<Database>, authUserId: string) {
   const { data: profile } = await supabase
     .from("enterprise_users")
-    .select("id, name, badge_id, consent_revoked, is_active")
+    .select("id, name, badge_id, consent_revoked, is_active, current_zone, is_in_workspace")
     .eq("auth_user_id", authUserId)
     .maybeSingle();
   return profile;
@@ -291,6 +291,70 @@ export const manualCheckInFallback = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const profile = await getCallerEnterpriseProfile(context.supabase, context.userId);
     if (!profile) throw new Error("No enterprise profile found for this account");
+    if (!profile.is_active) throw new Error("Inactive employee cannot record attendance");
+
+    const isAlreadyInside = profile.current_zone === "WORKSPACE_FLOOR";
+    if (data.direction === "ZONE_ENTER" && isAlreadyInside) {
+      throw new Error("Already clocked in. You are already in the workspace.");
+    }
+    if (data.direction === "ZONE_EXIT" && !isAlreadyInside) {
+      throw new Error("Cannot clock out: no active clock-in session found.");
+    }
+
+    const { supabaseAdmin, hasSupabaseAdminConfigured } =
+      await import("@/integrations/supabase/client.server");
+    const db = hasSupabaseAdminConfigured() ? supabaseAdmin : context.supabase;
+
+    // Concurrency Protection 1: Attempt Atomic Stored Procedure RPC if available in database
+    try {
+      const { data: rpcRes, error: rpcErr } = await (db.rpc as any)(
+        "record_manual_punch_atomic",
+        {
+          _employee_id: profile.id,
+          _direction: data.direction,
+          _notes: data.notes ?? null,
+        },
+      );
+
+      if (!rpcErr && rpcRes && rpcRes.success) {
+        return {
+          success: true,
+          message: `Manual ${data.direction === "ZONE_ENTER" ? "Clock-In" : "Clock-Out"} recorded successfully`,
+          direction: data.direction,
+          timestamp: rpcRes.timestamp,
+          zone: rpcRes.current_zone,
+          current_zone: rpcRes.current_zone,
+          is_in_workspace: rpcRes.is_in_workspace,
+        };
+      }
+
+      if (rpcErr) {
+        // Distinguish between unapplied migration (RPC not found) vs real database error / business rejection
+        const isNotFound =
+          rpcErr.code === "PGRST202" ||
+          rpcErr.code === "42883" ||
+          rpcErr.message?.includes("Could not find the function") ||
+          rpcErr.message?.includes("does not exist");
+
+        if (!isNotFound) {
+          // RPC exists and rejected request (e.g. duplicate punch, already clocked in, invalid state)
+          console.error("record_manual_punch_atomic rejected punch:", rpcErr);
+          throw new Error(rpcErr.message || "Manual punch rejected by database constraint");
+        }
+      }
+    } catch (err: any) {
+      const isNotFound =
+        err?.code === "PGRST202" ||
+        err?.code === "42883" ||
+        err?.message?.includes("Could not find the function") ||
+        err?.message?.includes("does not exist");
+
+      if (!isNotFound && err?.message && !err.message.includes("Cannot find module")) {
+        // Real validation / database exception — re-throw immediately, do NOT mask failure
+        throw err;
+      }
+      // Stored procedure not yet applied on remote instance; continue to canonical single-writer flow below
+    }
 
     const now = new Date();
     const isoTime = now.toISOString();
@@ -298,64 +362,72 @@ export const manualCheckInFallback = createServerFn({ method: "POST" })
     const zoneFrom = data.direction === "ZONE_ENTER" ? "CORRIDOR_TRANSIT" : "WORKSPACE_FLOOR";
     const zoneTo = data.direction === "ZONE_ENTER" ? "WORKSPACE_FLOOR" : "CORRIDOR_TRANSIT";
 
-    // 1. Record synthetic manual transit for audit trail
-    const vectorHash = await sha256Hex(`manual:${profile.id}:${isoTime}`);
-    await context.supabase.from("passive_transits").insert({
-      user_id: profile.id,
-      camera_id: null,
-      zone_from: zoneFrom,
-      zone_to: zoneTo,
-      direction: data.direction,
-      cosine_score: 1.0,
-      dram_scrub_ms: 0,
-      vector_hash: vectorHash,
-    });
-
-    // 2. Fetch or initialize today's attendance record
-    const { data: existing } = await context.supabase
-      .from("attendance_records")
-      .select("*")
-      .eq("employee_id", profile.id)
-      .eq("attendance_date", today)
+    // Concurrency Protection 2: Check for simultaneous/duplicate transits in passive_transits within 3s
+    const threeSecondsAgo = new Date(Date.now() - 3000).toISOString();
+    const { data: recentDuplicate, error: checkErr } = await db
+      .from("passive_transits")
+      .select("id")
+      .eq("user_id", profile.id)
+      .eq("direction", data.direction)
+      .eq("zone_to", zoneTo)
+      .gte("timestamp", threeSecondsAgo)
+      .limit(1)
       .maybeSingle();
 
-    if (!existing) {
-      await context.supabase.from("attendance_records").insert({
-        employee_id: profile.id,
-        attendance_date: today,
-        first_in: data.direction === "ZONE_ENTER" ? isoTime : null,
-        last_out: data.direction === "ZONE_EXIT" ? isoTime : null,
-        is_manual_entry: true,
-        status: "PRESENT",
-      });
-    } else {
-      const updates: Database["public"]["Tables"]["attendance_records"]["Update"] = {
-        is_manual_entry: true,
-        updated_at: isoTime,
-      };
-      if (data.direction === "ZONE_ENTER" && !existing.first_in) {
-        updates.first_in = isoTime;
-      }
-      if (data.direction === "ZONE_EXIT") {
-        updates.last_out = isoTime;
-      }
-      await context.supabase.from("attendance_records").update(updates).eq("id", existing.id);
+    if (!checkErr && recentDuplicate) {
+      throw new Error("Duplicate punch request detected within debounce window.");
     }
 
-    // 3. Update profile current_zone
-    await context.supabase
-      .from("enterprise_users")
-      .update({
-        current_zone: zoneTo,
-        is_in_workspace: zoneTo === "WORKSPACE_FLOOR",
+    // 1. Single Authoritative Writer: Insert into passive_transits
+    // The PostgreSQL apply_transit() database trigger executes as the sole writer:
+    //   - Evaluates chronological work and break intervals
+    //   - Upserts public.attendance_records
+    //   - Upserts public.employee_daily_dwell
+    //   - Updates public.enterprise_users.current_zone and is_in_workspace
+    const vectorHash = await sha256Hex(`manual:${profile.id}:${isoTime}`);
+    const { data: insertedTransit, error: transitErr } = await db
+      .from("passive_transits")
+      .insert({
+        user_id: profile.id,
+        camera_id: null,
+        zone_from: zoneFrom,
+        zone_to: zoneTo,
+        direction: data.direction,
+        cosine_score: 1.0,
+        dram_scrub_ms: 0,
+        vector_hash: vectorHash,
       })
-      .eq("id", profile.id);
+      .select("id, timestamp")
+      .single();
+
+    if (transitErr || !insertedTransit) {
+      console.error("Failed to insert manual transit:", transitErr);
+      if (transitErr?.code === "PGRST116") {
+        // Insert was cancelled by database BEFORE INSERT trigger returning NULL
+        throw new Error("Duplicate punch request detected within debounce window.");
+      }
+      throw new Error(`Failed to record manual transit: ${transitErr?.message || "Insert failed"}`);
+    }
+
+    // 2. Tag is_manual_entry on attendance_records (no double writing of hours or statuses)
+    const { error: tagErr } = await db
+      .from("attendance_records")
+      .update({ is_manual_entry: true, updated_at: isoTime })
+      .eq("employee_id", profile.id)
+      .eq("attendance_date", today);
+
+    if (tagErr) {
+      console.warn("Notice: could not tag is_manual_entry on attendance_records:", tagErr.message);
+    }
 
     return {
       success: true,
-      message: `Manual ${data.direction === "ZONE_ENTER" ? "Check-in" : "Check-out"} recorded successfully`,
+      message: `Manual ${data.direction === "ZONE_ENTER" ? "Clock-In" : "Clock-Out"} recorded successfully`,
+      direction: data.direction,
       timestamp: isoTime,
       zone: zoneTo,
+      current_zone: zoneTo,
+      is_in_workspace: zoneTo === "WORKSPACE_FLOOR",
     };
   });
 

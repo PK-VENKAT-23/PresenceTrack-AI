@@ -21,6 +21,44 @@ function dayBoundsIST(day: string) {
   return { from: `${day}T00:00:00+05:30`, to: `${day}T23:59:59.999+05:30` };
 }
 
+export const myProfileQuery = (enterpriseId: string) =>
+  queryOptions({
+    queryKey: ["profile", "me", enterpriseId],
+    queryFn: async (): Promise<EnterpriseUser> => {
+      const { data, error } = await supabase
+        .from("enterprise_users")
+        .select(
+          "id, auth_user_id, email, name, badge_id, department, role_title, avatar_url, current_zone, is_in_workspace, consent_revoked, is_active, created_at",
+        )
+        .eq("id", enterpriseId)
+        .single();
+      if (error) throw error;
+      return {
+        ...data,
+        is_active: data.is_active ?? true,
+        department_id: (data as { department_id?: string | null }).department_id ?? null,
+        employment_type: (data as { employment_type?: string }).employment_type ?? "FULL_TIME",
+        shift_start: (data as { shift_start?: string }).shift_start ?? "09:00:00",
+        shift_end: (data as { shift_end?: string }).shift_end ?? "18:00:00",
+      } as EnterpriseUser;
+    },
+  });
+
+export const myTodayAttendanceRecordQuery = (employeeId: string) =>
+  queryOptions({
+    queryKey: ["attendance", "today", employeeId, todayIST()],
+    queryFn: async (): Promise<AttendanceRecord | null> => {
+      const { data, error } = await supabase
+        .from("attendance_records")
+        .select("*")
+        .eq("employee_id", employeeId)
+        .eq("attendance_date", todayIST())
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+  });
+
 export const myDwellQuery = (enterpriseId: string) =>
   queryOptions({
     queryKey: ["dwell", "me", enterpriseId, todayIST()],
@@ -92,13 +130,41 @@ export const nodesQuery = () =>
     refetchInterval: 5000,
   });
 
+export interface DetectedFaceTelemetry {
+  bbox: { x: number; y: number; w: number; h: number };
+  identity_status: "VERIFIED" | "UNKNOWN" | "VERIFYING";
+  matched_name?: string | null;
+  matched_person_id?: string | null;
+  sc_score?: number;
+  track_id?: string | number | null;
+  candidate_employee_id?: string | null;
+  candidate_name?: string | null;
+  similarity_score?: number;
+  matching_threshold?: number;
+  confirmation_count?: number;
+  required_confirmation_count?: number;
+  last_match_timestamp?: string | null;
+  time_to_verified_ms?: number;
+  detection_latency_ms?: number;
+  recognition_latency_ms?: number;
+}
+
 export interface LiveTelemetry {
   camera_id: string;
   is_live: boolean;
   face_detected: boolean;
   face_bounding_box: { x: number; y: number; w: number; h: number } | null;
+  detected_faces?: DetectedFaceTelemetry[];
   sc_score: number;
+  match_score?: number;
   confidence_category: string;
+  identity_status?: "VERIFIED" | "UNKNOWN" | "VERIFYING" | "NO_FACE" | "STALE";
+  track_id?: string | number | null;
+  consent_valid?: boolean;
+  template_match_confirmed?: boolean;
+  consecutive_match_frames?: number;
+  matching_threshold?: number;
+  required_confirmation_count?: number;
   matched_name: string | null;
   matched_person_id: string | null;
   person_count: number;
@@ -114,6 +180,13 @@ export interface LiveTelemetry {
   last_successful_frame_timestamp?: string | null;
   last_diagnostic_timestamp?: string | null;
   recovery_attempt_count?: number;
+  actual_fps?: number;
+  avg_frame_interval_ms?: number;
+  frame_processing_latency_ms?: number;
+  face_detection_latency_ms?: number;
+  face_recognition_latency_ms?: number;
+  dropped_frames?: number;
+  frame_queue_depth?: number;
 }
 
 export const liveTelemetryQuery = () =>
@@ -143,7 +216,13 @@ export const liveTelemetryQuery = () =>
           face_detected: false,
           face_bounding_box: null,
           sc_score: 0,
+          match_score: 0,
           confidence_category: "UNKNOWN",
+          identity_status: "NO_FACE",
+          track_id: null,
+          consent_valid: false,
+          template_match_confirmed: false,
+          consecutive_match_frames: 0,
           matched_name: null,
           matched_person_id: null,
           person_count: 0,
@@ -153,6 +232,13 @@ export const liveTelemetryQuery = () =>
           is_stale: false,
           is_synthetic: false,
           real_frame_count: 0,
+          actual_fps: 0,
+          avg_frame_interval_ms: 0,
+          frame_processing_latency_ms: 0,
+          face_detection_latency_ms: 0,
+          face_recognition_latency_ms: 0,
+          dropped_frames: 0,
+          frame_queue_depth: 0,
         };
       }
     },

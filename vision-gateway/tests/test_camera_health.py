@@ -368,3 +368,348 @@ def test_api_run_diagnostics_on_demand(test_client):
     data = resp.json()
     assert "diagnostic" in data
     assert "checks" in data["diagnostic"]
+
+
+def test_auto_recovery_ongoing_polling_after_retry_budget_exhaustion(monitor, mock_camera):
+    """Verify monitor does not halt forever after 5 failures and resumes when backoff elapses."""
+    mock_camera.is_camera_live = False
+    mock_camera.is_stale = True
+    mock_camera.reconnect.return_value = False
+
+    # Force 5 failures
+    for _ in range(5):
+        monitor._next_allowed_recovery_time = 0.0
+        monitor._attempt_automatic_recovery("Connection failure")
+
+    assert monitor.consecutive_failures == 5
+    assert monitor.recovery_status == "RECOVERY_FAILED"
+
+    # Now camera hardware comes back online!
+    def restore_camera(force=True):
+        mock_camera.is_camera_live = True
+        mock_camera.is_stale = False
+        mock_camera.real_frame_count = 500
+        return True
+
+    mock_camera.reconnect.side_effect = restore_camera
+    monitor._next_allowed_recovery_time = 0.0  # Backoff delay elapsed
+
+    # Next attempt must be executed and succeed!
+    monitor._attempt_automatic_recovery("Ongoing background probe")
+    assert monitor.recovery_status == "LIVE"
+    assert monitor.consecutive_failures == 0
+    assert monitor.current_failure_reason is None
+
+
+def test_reader_thread_revival_on_manual_refresh(monitor, mock_camera):
+    """Verify manual refresh invokes ensure_threads_running to revive dead reader threads."""
+    mock_camera.ensure_threads_running = MagicMock()
+    mock_camera.is_camera_live = True
+    mock_camera.is_stale = False
+    mock_camera.real_frame_count = 100
+
+    def fake_reconnect(force=True):
+        mock_camera.real_frame_count = 105
+        return True
+
+    mock_camera.reconnect.side_effect = fake_reconnect
+
+    res = monitor.manual_refresh(force=True)
+    assert res["success"] is True
+    assert res["new_frames_received"] == 5
+    mock_camera.ensure_threads_running.assert_called_once()
+
+
+def test_manual_refresh_strictly_fails_when_zero_fresh_frames_arrive(monitor, mock_camera):
+    """Verify manual refresh NEVER returns success: true if real frames do not advance."""
+    mock_camera.is_camera_live = True
+    mock_camera.is_stale = False
+    mock_camera.real_frame_count = 500
+    mock_camera.reconnect.return_value = True  # Connection succeeded, but zero fresh frames
+
+    with patch("time.sleep", return_value=None):  # Fast forward polling loop
+        res = monitor.manual_refresh(force=True)
+
+    assert res["success"] is False
+    assert res["new_frames_received"] == 0
+    assert res["camera_live"] is False
+    assert res["status"] in ("STREAM_STALE", "CAMERA_OFFLINE")
+    assert monitor.recovery_status != "LIVE"
+
+
+def test_api_camera_reconnect_exception_returns_meaningful_error_not_500(test_client):
+    """Verify unexpected exception during camera reconnect returns HTTP 200 with error details rather than 500."""
+    with patch("main.health_monitor.manual_refresh", side_effect=RuntimeError("Simulated hardware bus lock")):
+        resp = test_client.post("/camera/reconnect")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "failed"
+        assert data["camera_connected"] is False
+        assert "Simulated hardware bus lock" in data["message"]
+        assert "Simulated hardware bus lock" in data["failure_reason"]
+
+
+def test_failed_manual_refresh_preserves_offline_state_and_updates_consecutive_failures(monitor, mock_camera):
+    """Verify failed manual refresh does not report live and updates consecutive failure counter."""
+    mock_camera.is_camera_live = False
+    mock_camera.is_stale = True
+    mock_camera.real_frame_count = 50
+    mock_camera.reconnect.return_value = False
+
+    res = monitor.manual_refresh(force=True)
+    assert res["success"] is False
+    assert res["camera_live"] is False
+    assert monitor.consecutive_failures == 1
+    assert monitor.recovery_status == "CAMERA_OFFLINE"
+
+
+# ---------------------------------------------------------------------------
+# 5. Health State Consistency & Zero-Frame Protection Regressions
+# ---------------------------------------------------------------------------
+def test_zero_real_frames_never_reported_as_healthy_or_live(test_client, monitor, mock_camera):
+    """Verify that when 0 real frames have arrived, /health and diagnostics never report healthy or LIVE."""
+    mock_camera.use_synthetic = False
+    mock_camera._forced_is_camera_connected = None
+    mock_camera.real_frame_count = 0
+    mock_camera.is_stale = False
+    diag = monitor.run_diagnostics()
+    assert diag["overall_status"] != "LIVE"
+
+    orig_real = camera.real_frame_count
+    orig_synth = camera.use_synthetic
+    orig_forced = getattr(camera, "_forced_is_camera_connected", None)
+    try:
+        camera.use_synthetic = False
+        camera._forced_is_camera_connected = None
+        camera.real_frame_count = 0
+        resp = test_client.get("/health")
+        assert resp.json()["status"] != "healthy"
+        assert resp.json()["camera_connected"] is False
+    finally:
+        camera.real_frame_count = orig_real
+        camera.use_synthetic = orig_synth
+        camera._forced_is_camera_connected = orig_forced
+
+
+def test_health_and_camera_status_consistent_when_offline(test_client):
+    """Verify /health and /camera/status provide identical, consistent health states when offline."""
+    orig_conn = getattr(camera, "_forced_is_camera_connected", None)
+    orig_synth = getattr(camera, "use_synthetic", False)
+    orig_rec = health_monitor.recovery_status
+    orig_fails = health_monitor.consecutive_failures
+    orig_reason = health_monitor.current_failure_reason
+    orig_real = camera.real_frame_count
+
+    try:
+        camera.use_synthetic = False
+        camera._forced_is_camera_connected = False
+        camera.real_frame_count = 0
+        camera.last_real_frame_timestamp = 0.0
+        health_monitor.recovery_status = "RECOVERY_FAILED"
+        health_monitor.consecutive_failures = 5
+        health_monitor.current_failure_reason = "Network route unreachable to 10.204.175.1:81 (No route to host, errno 65)"
+
+        health_resp = test_client.get("/health")
+        status_resp = test_client.get("/camera/status")
+
+        assert health_resp.status_code == 200
+        assert status_resp.status_code == 200
+
+        h_data = health_resp.json()
+        s_data = status_resp.json()
+
+        # Consistent offline status
+        assert h_data["status"] == "camera_disconnected"
+        assert h_data["camera_connected"] is False
+        assert s_data["is_camera_connected"] is False
+        assert s_data["is_camera_live"] is False
+        assert s_data["is_connected"] is False
+
+        # Identical frame count (0)
+        assert h_data["real_frame_count"] == 0
+        assert s_data["real_frame_count"] == 0
+
+        # Consistent recovery and failure states
+        assert h_data["recovery_status"] == "RECOVERY_FAILED"
+        assert s_data["recovery_status"] == "RECOVERY_FAILED"
+        assert h_data["consecutive_failures"] == 5
+        assert s_data["consecutive_failures"] == 5
+        assert h_data["current_failure_reason"] == s_data["current_failure_reason"]
+        assert "errno 65" in h_data["current_failure_reason"]
+
+        # Neither reports stale when simply offline
+        assert h_data["is_stale"] is False
+        assert s_data["is_stale"] is False
+    finally:
+        camera._forced_is_camera_connected = orig_conn
+        camera.use_synthetic = orig_synth
+        health_monitor.recovery_status = orig_rec
+        health_monitor.consecutive_failures = orig_fails
+        health_monitor.current_failure_reason = orig_reason
+        camera.real_frame_count = orig_real
+
+
+def test_mac_network_route_error_does_not_declare_power_cycle_required(monitor, mock_camera):
+    """Verify Mac network error (errno 65) uses exponential backoff and never declares PHYSICAL_POWER_CYCLE_REQUIRED."""
+    mock_camera.is_camera_live = False
+    mock_camera.is_stale = False
+    mock_camera.real_frame_count = 0
+    mock_camera.reconnect.return_value = False
+    monitor.consecutive_failures = 7  # High failure count
+
+    # Network probe returns errno 65 (No route to host)
+    with patch.object(
+        monitor,
+        "check_network_reachability",
+        return_value=(False, "Network route unreachable to 10.204.175.1:81 (No route to host, errno 65) - verify Mac Wi-Fi / hotspot"),
+    ):
+        with patch("time.sleep", return_value=None):
+            res = monitor.manual_refresh(force=True)
+
+        assert res["success"] is False
+        assert res["status"] != "PHYSICAL_POWER_CYCLE_REQUIRED"
+        assert res["status"] in ("RECOVERY_FAILED", "CAMERA_OFFLINE")
+        assert monitor.recovery_status != "PHYSICAL_POWER_CYCLE_REQUIRED"
+        assert "errno 65" in monitor.current_failure_reason or "offline" in monitor.current_failure_reason.lower()
+
+
+def test_hardware_reachable_vs_stale_stream_distinction(monitor, mock_camera):
+    """Verify reaching hardware :81/status but 0 frames arriving classifies as STREAM_STALE / CAMERA_REACHABLE."""
+    mock_camera.is_camera_live = False
+    mock_camera.is_stale = False
+    mock_camera.real_frame_count = 10
+    mock_camera.reconnect.return_value = True
+    mock_camera.probe_camera_status = MagicMock(return_value=(True, {"sensor": "GC2145"}))
+    monitor.consecutive_failures = 0
+
+    with patch("time.sleep", return_value=None):
+        res = monitor.manual_refresh(force=True)
+
+    assert res["success"] is False
+    assert res["status"] == "STREAM_STALE"
+    assert res["detailed_state"] == "CAMERA_REACHABLE"
+    assert monitor.recovery_status == "STREAM_STALE"
+    assert "reachable" in monitor.current_failure_reason.lower()
+
+
+def test_mac_network_unavailable_errno_65_returns_network_unavailable(monitor, mock_camera):
+    """Verify Mac network error errno 65 returns detailed_state NETWORK_UNAVAILABLE and success False."""
+    with patch.object(
+        monitor,
+        "check_network_reachability",
+        return_value=(False, "Network route unreachable to 10.204.175.1:81 (No route to host, errno 65) - verify Mac Wi-Fi / hotspot"),
+    ):
+        res = monitor.manual_refresh(force=True)
+        assert res["success"] is False
+        assert res["detailed_state"] == "NETWORK_UNAVAILABLE"
+        assert res["status"] in ("CAMERA_OFFLINE", "RECOVERY_FAILED")
+        assert "errno 65" in res["message"] or "unreachable" in res["message"].lower()
+
+
+def test_esp32_unreachable_errno_61(monitor, mock_camera):
+    """Verify ESP32 connection refused errno 61 returns CAMERA_UNREACHABLE / CAMERA_OFFLINE."""
+    mock_camera.reconnect.return_value = False
+    mock_camera.is_connected = False
+    with patch.object(
+        monitor,
+        "check_network_reachability",
+        return_value=(False, "Connection to 10.204.175.1:81 failed (Connection refused, errno 61)"),
+    ):
+        with patch("time.sleep", return_value=None):
+            res = monitor.manual_refresh(force=True)
+        assert res["success"] is False
+        assert res["status"] in ("CAMERA_OFFLINE", "RECOVERY_FAILED")
+        assert res["detailed_state"] == "CAMERA_UNREACHABLE"
+        assert "Connection refused" in res["message"] or "Connection refused" in str(monitor.current_failure_reason)
+
+
+def test_recovery_after_network_returns(monitor, mock_camera):
+    """Verify transition from CAMERA_OFFLINE to LIVE when network route returns and fresh frames arrive."""
+    monitor.recovery_status = "CAMERA_OFFLINE"
+    monitor.consecutive_failures = 3
+    mock_camera.is_camera_live = True
+    mock_camera.is_stale = False
+    mock_camera.real_frame_count = 100
+
+    def fake_reconnect(force=True):
+        mock_camera.real_frame_count = 110
+        return True
+
+    mock_camera.reconnect.side_effect = fake_reconnect
+    with patch.object(monitor, "check_network_reachability", return_value=(True, "Reachable")):
+        res = monitor.manual_refresh(force=True)
+
+    assert res["success"] is True
+    assert res["status"] == "LIVE"
+    assert res["new_frames_received"] == 10
+    assert monitor.recovery_status == "LIVE"
+    assert monitor.consecutive_failures == 0
+    assert monitor.current_failure_reason is None
+
+
+def test_fresh_frame_advancement_strictly_required_for_recovery(monitor, mock_camera):
+    """Verify that recovery strictly requires cur_real > initial_real_frames before reporting LIVE."""
+    mock_camera.is_camera_live = True
+    mock_camera.is_stale = False
+    mock_camera.real_frame_count = 250
+
+    # Reconnect returns True but frame count remains 250
+    mock_camera.reconnect.return_value = True
+
+    with patch.object(monitor, "check_network_reachability", return_value=(True, "Reachable")):
+        with patch("time.sleep", return_value=None):
+            res = monitor.manual_refresh(force=True)
+
+    assert res["success"] is False
+    assert res["new_frames_received"] == 0
+    assert monitor.recovery_status != "LIVE"
+
+
+def test_supervisor_network_awareness_and_sleep_wake():
+    """Verify supervisor functions distinguish NETWORK_UNAVAILABLE, CAMERA_UNREACHABLE, and LIVE."""
+    from pathlib import Path
+    import socket
+    import errno
+
+    scripts_dir = Path(__file__).resolve().parent.parent.parent / "scripts"
+    sys.path.insert(0, str(scripts_dir))
+    import supervisor
+
+    # 1. Test Darwin errno 65 -> NETWORK_UNAVAILABLE
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock.connect.side_effect = OSError(errno.EHOSTUNREACH, "No route to host")
+        mock_sock_cls.return_value = mock_sock
+
+        stat, msg = supervisor.check_network_route_status("10.204.175.1", 81)
+        assert stat == "NETWORK_UNAVAILABLE"
+        assert "errno 65" in msg
+
+    # 2. Test errno 61 -> CAMERA_UNREACHABLE
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock.connect.side_effect = OSError(errno.ECONNREFUSED, "Connection refused")
+        mock_sock_cls.return_value = mock_sock
+
+        stat, msg = supervisor.check_network_route_status("10.204.175.1", 81)
+        assert stat == "CAMERA_UNREACHABLE"
+        assert "errno 61" in msg
+
+    # 3. Test timeout -> CAMERA_UNREACHABLE
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock.connect.side_effect = socket.timeout("timed out")
+        mock_sock_cls.return_value = mock_sock
+
+        stat, msg = supervisor.check_network_route_status("10.204.175.1", 81)
+        assert stat == "CAMERA_UNREACHABLE"
+        assert "timed out" in msg
+
+    # 4. Test connection established -> REACHABLE
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock.connect.return_value = None
+        mock_sock_cls.return_value = mock_sock
+
+        stat, msg = supervisor.check_network_route_status("10.204.175.1", 81)
+        assert stat == "REACHABLE"

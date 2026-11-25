@@ -9,6 +9,7 @@ describe("strict enclave isolation", () => {
     expect(enclavePathFor("hr_ops")).toBe("/enclave/hr");
     expect(enclavePathFor("security")).toBe("/enclave/security");
     expect(enclavePathFor("super_admin")).toBe("/enclave/admin");
+    expect(enclavePathFor("dpo")).toBe("/enclave/admin");
   });
 
   it("blocks cross-role navigation", () => {
@@ -17,6 +18,10 @@ describe("strict enclave isolation", () => {
     expect(canAccessEnclave("security", "admin")).toBe(false);
     expect(canAccessEnclave("super_admin", "employee")).toBe(false);
     expect(canAccessEnclave("super_admin", "admin")).toBe(true);
+    expect(canAccessEnclave("dpo", "admin")).toBe(true);
+    expect(canAccessEnclave("dpo", "employee")).toBe(false);
+    expect(canAccessEnclave("dpo", "hr")).toBe(false);
+    expect(canAccessEnclave("dpo", "security")).toBe(false);
   });
 
   it("strictly denies access to any enclave for null or undefined roles", () => {
