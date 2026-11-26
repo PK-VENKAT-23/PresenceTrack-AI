@@ -122,16 +122,16 @@ function SecurityEnclave() {
             isStale={isStale}
             recoveryStatus={telemetry?.recovery_status}
             streamUrl={isNodeAttested ? GATEWAY_VIDEO_FEED_URL : null}
-            faceDetected={!isStale && (telemetry?.face_detected ?? false)}
-            faceBoundingBox={isStale ? null : (telemetry?.face_bounding_box ?? null)}
-            scScore={isStale ? 0 : (telemetry?.sc_score ?? 0)}
-            matchScore={isStale ? 0 : (telemetry?.match_score ?? telemetry?.sc_score ?? 0)}
-            identityStatus={isStale ? "STALE" : telemetry?.identity_status}
-            matchedName={isStale || telemetry?.identity_status !== "VERIFIED" ? null : telemetry?.matched_name}
-            trackId={isStale ? null : telemetry?.track_id}
-            consecutiveMatchFrames={isStale ? 0 : (telemetry?.consecutive_match_frames ?? 0)}
+            faceDetected={!isStale && isCameraLive && (telemetry?.face_detected ?? false)}
+            faceBoundingBox={!isCameraLive || isStale ? null : (telemetry?.face_bounding_box ?? null)}
+            scScore={!isCameraLive || isStale ? 0 : (telemetry?.sc_score ?? 0)}
+            matchScore={!isCameraLive || isStale ? 0 : (telemetry?.match_score ?? telemetry?.sc_score ?? 0)}
+            identityStatus={!isCameraLive ? "NO_FACE" : (isStale ? "STALE" : telemetry?.identity_status)}
+            matchedName={!isCameraLive || isStale || telemetry?.identity_status !== "VERIFIED" ? null : telemetry?.matched_name}
+            trackId={!isCameraLive || isStale ? null : telemetry?.track_id}
+            consecutiveMatchFrames={!isCameraLive || isStale ? 0 : (telemetry?.consecutive_match_frames ?? 0)}
             detectedFaces={
-              isStale
+              !isCameraLive || isStale
                 ? []
                 : (telemetry?.detected_faces?.map((f) => ({
                     bbox: f.bbox,

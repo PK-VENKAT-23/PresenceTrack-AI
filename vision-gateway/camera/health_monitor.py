@@ -154,24 +154,17 @@ class CameraHealthMonitor:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1.5)
             try:
-                res = sock.connect_ex((host, port))
-                if res == 0:
-                    return True, f"ESP32-CAM endpoint reachable on {host}:{port}"
-                # On Darwin, non-blocking connect_ex can return 35 (EAGAIN) or 36 (EINPROGRESS)
-                if res in (35, 36):
-                    try:
-                        sock.connect((host, port))
-                        return True, f"ESP32-CAM endpoint reachable on {host}:{port}"
-                    except socket.timeout:
-                        return False, f"Connection to {host}:{port} timed out after 1.5s"
-                    except OSError as exc:
-                        res = getattr(exc, "errno", res)
-
+                sock.connect((host, port))
+                return True, f"ESP32-CAM endpoint reachable on {host}:{port}"
+            except (socket.timeout, TimeoutError):
+                return False, f"Connection to {host}:{port} timed out after 1.5s"
+            except OSError as exc:
+                res = getattr(exc, "errno", 0)
                 err_desc = ""
                 try:
                     err_desc = os.strerror(res)
                 except Exception:
-                    err_desc = f"errno {res}"
+                    err_desc = errno.errorcode.get(res, f"errno {res}")
                 if res in (65, 64, 50, 51):
                     return False, f"Network route unreachable to {host}:{port} ({err_desc}, errno {res}) - verify Mac Wi-Fi / hotspot"
                 return False, f"Connection to {host}:{port} failed ({err_desc}, errno {res})"
@@ -649,7 +642,7 @@ class CameraHealthMonitor:
                     detailed_state = "CAMERA_REACHABLE"
                     msg = (
                         f"Camera hardware reachable at :81/status, but stream produced 0 fresh frames in 5.0s window ({t_elapsed:.2f}s). "
-                        "Stream is stale or decoder stalled."
+                        "Stream is stale or decoder stalled. Note: If a browser tab is viewing http://10.204.175.1:81/stream directly, please close it as ESP32-CAM supports only 1 active client stream."
                     )
                 elif connected and getattr(self.camera, "is_connected", False):
                     self.recovery_status = "STREAM_STALE"
@@ -772,8 +765,10 @@ class CameraHealthMonitor:
                             self._attempt_automatic_recovery(
                                 diag.get("current_failure_reason") or "Stream unhealthy after confirmation checks"
                             )
-                        else:
+                        elif self.consecutive_failures >= self.max_recovery_failures:
                             self.recovery_status = "RECOVERY_FAILED"
+                        else:
+                            self.recovery_status = "CAMERA_OFFLINE"
             except Exception as loop_err:
                 logger.error("[CameraHealthMonitor] Unexpected error in monitor loop: %s", loop_err)
 

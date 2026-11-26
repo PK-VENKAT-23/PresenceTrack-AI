@@ -175,27 +175,29 @@ export function Esp32CanvasOverlay({
   })();
 
   const facesToRender: DetectedFaceItem[] =
-    detectedFaces && detectedFaces.length > 0
-      ? detectedFaces
-      : isAnyFaceDetected && faceBoundingBox
-        ? [
-            {
-              bbox: faceBoundingBox,
-              identityStatus:
-                computedIdentityStatus === "VERIFIED"
-                  ? "VERIFIED"
-                  : computedIdentityStatus === "VERIFYING"
-                    ? "VERIFYING"
-                    : "UNKNOWN",
-              matchedName,
-              scScore: matchScore ?? scScore,
-              trackId,
-            },
-          ]
-        : [];
+    (!isLive || isStale)
+      ? []
+      : detectedFaces && detectedFaces.length > 0
+        ? detectedFaces
+        : isAnyFaceDetected && faceBoundingBox
+          ? [
+              {
+                bbox: faceBoundingBox,
+                identityStatus:
+                  computedIdentityStatus === "VERIFIED"
+                    ? "VERIFIED"
+                    : computedIdentityStatus === "VERIFYING"
+                      ? "VERIFYING"
+                      : "UNKNOWN",
+                matchedName,
+                scScore: matchScore ?? scScore,
+                trackId,
+              },
+            ]
+          : [];
 
   const currentVerifiedName = (() => {
-    if (computedIdentityStatus !== "VERIFIED") return null;
+    if (!isLive || isStale || computedIdentityStatus !== "VERIFIED") return null;
     const verifiedFace = facesToRender.find((f) => f.identityStatus === "VERIFIED");
     return verifiedFace?.matchedName || (identityStatus === "VERIFIED" || !identityStatus ? matchedName : null);
   })();

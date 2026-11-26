@@ -15,11 +15,14 @@ import logging
 import threading
 import time
 from typing import Any, Dict, List, Optional, Union
+import urllib.error
+import urllib.request
 import cv2
 from fastapi import FastAPI, HTTPException, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+import requests
 import uvicorn
 import numpy as np
 

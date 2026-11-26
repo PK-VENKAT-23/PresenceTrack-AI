@@ -713,3 +713,113 @@ def test_supervisor_network_awareness_and_sleep_wake():
 
         stat, msg = supervisor.check_network_route_status("10.204.175.1", 81)
         assert stat == "REACHABLE"
+
+
+def test_check_network_reachability_never_raises_name_error_on_socket_errors(mock_camera, mock_dispatcher):
+    """Regression test: verify check_network_reachability handles Darwin socket errnos cleanly without NameError."""
+    import errno
+    import socket
+    monitor = CameraHealthMonitor(camera_reader=mock_camera, event_dispatcher=mock_dispatcher)
+    mock_camera.is_camera_live = False
+    mock_camera.is_stale = True
+
+    # 1. Darwin errno 65 (No route to host)
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock.connect.side_effect = OSError(errno.EHOSTUNREACH, "No route to host")
+        mock_sock_cls.return_value = mock_sock
+
+        ok, msg = monitor.check_network_reachability()
+        assert ok is False
+        assert "errno 65" in msg or "route unreachable" in msg
+        assert "NameError" not in msg
+
+    # 2. Connection refused (errno 61)
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock.connect.side_effect = OSError(errno.ECONNREFUSED, "Connection refused")
+        mock_sock_cls.return_value = mock_sock
+
+        ok, msg = monitor.check_network_reachability()
+        assert ok is False
+        assert "61" in msg
+        assert "NameError" not in msg
+
+    # 3. Timeout
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock.connect.side_effect = socket.timeout("timed out")
+        mock_sock_cls.return_value = mock_sock
+
+        ok, msg = monitor.check_network_reachability()
+        assert ok is False
+        assert "timed out" in msg
+        assert "NameError" not in msg
+
+    # 4. Connection established successfully
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock = MagicMock()
+        mock_sock.connect.return_value = None
+        mock_sock_cls.return_value = mock_sock
+
+        ok, msg = monitor.check_network_reachability()
+        assert ok is True
+        assert "reachable" in msg
+
+    # 5. Generic exception
+    with patch("socket.socket") as mock_sock_cls:
+        mock_sock_cls.side_effect = RuntimeError("Simulated socket subsystem failure")
+
+        ok, msg = monitor.check_network_reachability()
+        assert ok is False
+        assert "RuntimeError" in msg
+        assert "NameError" not in msg
+
+
+def test_camera_reboot_endpoint_handles_missing_firmware_gracefully(mock_camera):
+    """Test POST /camera/reboot truthfully handles camera without remote restart support without NameError."""
+    from fastapi.testclient import TestClient
+    from config import config
+
+    client = TestClient(app)
+
+    with patch.object(camera, "probe_camera_status", return_value=(True, "OK")):
+        with patch.object(health_monitor, "manual_refresh", return_value={"success": True, "camera_live": True}):
+            # Urllib / requests connection to non-existent /restart endpoint
+            with patch("urllib.request.urlopen", side_effect=Exception("404 Not Found")):
+                resp = client.post(
+                    "/camera/reboot",
+                    headers={"x-device-key": config.device_key},
+                )
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["success"] is False
+                assert data["status"] == "FIRMWARE_RESTART_NOT_SUPPORTED"
+                assert "Physical power cycle" in data["message"]
+
+
+def test_manual_refresh_resets_recovery_failed_state(mock_camera, mock_dispatcher):
+    """Verify manual refresh clears RECOVERY_FAILED status and restores LIVE upon frame arrival."""
+    monitor = CameraHealthMonitor(camera_reader=mock_camera, event_dispatcher=mock_dispatcher)
+    monitor.recovery_status = "RECOVERY_FAILED"
+    monitor.consecutive_failures = 5
+    monitor.current_failure_reason = "Test previous failure"
+
+    mock_camera.real_frame_count = 100
+    mock_camera.is_stale = False
+    mock_camera.reconnect.return_value = True
+
+    # Advance frame count during verification
+    def fake_reconnect(*args, **kwargs):
+        mock_camera.real_frame_count = 105
+        return True
+
+    mock_camera.reconnect.side_effect = fake_reconnect
+
+    res = monitor.manual_refresh(force=True)
+    assert res["success"] is True
+    assert res["status"] == "LIVE"
+    assert monitor.recovery_status == "LIVE"
+    assert monitor.consecutive_failures == 0
+    assert monitor.current_failure_reason is None
+

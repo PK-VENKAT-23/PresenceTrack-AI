@@ -472,4 +472,92 @@ describe("Camera Health Monitor, Diagnostics & Automatic Recovery Frontend", () 
       });
     });
   });
+
+  describe("Stale Identity & Face Detection Clearing", () => {
+    const historicalTelemetry: LiveTelemetry = {
+      camera_id: "ESP32-CAM-01-NORTH",
+      is_live: true,
+      face_detected: true,
+      face_bounding_box: { x: 100, y: 100, w: 80, h: 80 },
+      identity_status: "VERIFIED",
+      matched_name: "Venkat PK",
+      matched_person_id: "a0000000-0000-0000-0000-000000000001",
+      sc_score: 0.88,
+      confidence_category: "HIGH",
+      person_count: 1,
+      active_tracks: 1,
+      last_event: null,
+      detected_faces: [
+        {
+          bbox: { x: 100, y: 100, w: 80, h: 80 },
+          identity_status: "VERIFIED",
+          matched_name: "Venkat PK",
+          sc_score: 0.88,
+        },
+      ],
+      updated_at: new Date().toISOString(),
+    };
+
+    it("clears face identities and displays NO FACE DETECTED when camera is offline", () => {
+      renderWithClient(
+        <Esp32CameraControlCard
+          nodes={mockNodes}
+          activeNode={mockNodes[0]}
+          isNodeAttested={false}
+          isCameraLive={false}
+          live={0}
+          telemetry={historicalTelemetry}
+        />,
+      );
+
+      // Verify CAMERA OFFLINE badge is shown
+      expect(screen.getAllByText("CAMERA OFFLINE").length).toBeGreaterThan(0);
+      // Verify bottom identity text is strictly cleared to NO FACE DETECTED
+      expect(screen.getByTestId("bottom-identity-text")).toHaveTextContent("NO FACE DETECTED");
+      expect(screen.queryByText(/VERIFIED USER: VENKAT PK/i)).not.toBeInTheDocument();
+    });
+
+    it("clears face identities when stream is stale", () => {
+      renderWithClient(
+        <Esp32CameraControlCard
+          nodes={mockNodes}
+          activeNode={mockNodes[0]}
+          isNodeAttested={true}
+          isCameraLive={true}
+          live={1}
+          telemetry={{
+            ...historicalTelemetry,
+            is_stale: true,
+            recovery_status: "STREAM_STALE",
+            current_failure_reason: "Stream stale: 0 frames in 3s",
+          }}
+        />,
+      );
+
+      // Verify STREAM STALE badge is shown
+      expect(screen.getAllByText("STREAM STALE").length).toBeGreaterThan(0);
+      expect(screen.getByTestId("bottom-identity-text")).toHaveTextContent("NO FACE DETECTED");
+      expect(screen.queryByText(/VERIFIED USER: VENKAT PK/i)).not.toBeInTheDocument();
+    });
+
+    it("displays verified identity when camera is live and active", () => {
+      renderWithClient(
+        <Esp32CameraControlCard
+          nodes={mockNodes}
+          activeNode={mockNodes[0]}
+          isNodeAttested={true}
+          isCameraLive={true}
+          live={1}
+          telemetry={{
+            ...historicalTelemetry,
+            recovery_status: "LIVE",
+          }}
+        />,
+      );
+
+      // Verify LIVE badge and optical match text
+      expect(screen.getByText("LIVE")).toBeInTheDocument();
+      expect(screen.getByTestId("bottom-identity-text")).toHaveTextContent("VERIFIED USER: VENKAT PK");
+    });
+  });
 });

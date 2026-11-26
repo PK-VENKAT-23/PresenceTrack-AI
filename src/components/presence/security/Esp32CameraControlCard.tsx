@@ -109,9 +109,11 @@ export function Esp32CameraControlCard({
       setIsRefreshing(true);
       const res = await refreshStreamFn({ data: { force: true } });
 
-      if (res.success && res.new_frames_received > 0) {
+      if (res.success && (res.new_frames_received > 0 || res.is_synthetic)) {
         toast.success(
-          `Camera stream refreshed: ${res.new_frames_received} fresh frames in ${res.time_taken_sec}s`,
+          res.is_synthetic
+            ? "Camera stream refreshed (synthetic stream active)"
+            : `Camera stream refreshed: ${res.new_frames_received} fresh frames in ${res.time_taken_sec}s`,
         );
       } else {
         toast.error(res.message || res.failure_reason || "Camera refresh failed: No fresh real frames received");
@@ -278,16 +280,16 @@ export function Esp32CameraControlCard({
         isLive={isCameraLive && displayState !== "RECOVERY FAILED" && displayState !== "PHYSICAL POWER CYCLE REQUIRED"}
         isStale={isStale || isRefreshing || displayState === "RECONNECTING" || displayState === "CAMERA REBOOTING"}
         streamUrl={isNodeAttested ? GATEWAY_VIDEO_FEED_URL : null}
-        faceDetected={!isStale && (telemetry?.face_detected ?? false)}
-        faceBoundingBox={isStale ? null : (telemetry?.face_bounding_box ?? null)}
-        scScore={isStale ? 0 : (telemetry?.sc_score ?? 0)}
-        matchScore={isStale ? 0 : (telemetry?.match_score ?? telemetry?.sc_score ?? 0)}
-        identityStatus={isStale ? "STALE" : telemetry?.identity_status}
-        matchedName={isStale || telemetry?.identity_status !== "VERIFIED" ? null : telemetry?.matched_name}
-        trackId={isStale ? null : telemetry?.track_id}
-        consecutiveMatchFrames={isStale ? 0 : (telemetry?.consecutive_match_frames ?? 0)}
+        faceDetected={!isStale && isCameraLive && (telemetry?.face_detected ?? false)}
+        faceBoundingBox={!isCameraLive || isStale ? null : (telemetry?.face_bounding_box ?? null)}
+        scScore={!isCameraLive || isStale ? 0 : (telemetry?.sc_score ?? 0)}
+        matchScore={!isCameraLive || isStale ? 0 : (telemetry?.match_score ?? telemetry?.sc_score ?? 0)}
+        identityStatus={!isCameraLive ? "NO_FACE" : (isStale ? "STALE" : telemetry?.identity_status)}
+        matchedName={!isCameraLive || isStale || telemetry?.identity_status !== "VERIFIED" ? null : telemetry?.matched_name}
+        trackId={!isCameraLive || isStale ? null : telemetry?.track_id}
+        consecutiveMatchFrames={!isCameraLive || isStale ? 0 : (telemetry?.consecutive_match_frames ?? 0)}
         detectedFaces={
-          isStale
+          !isCameraLive || isStale
             ? []
             : (telemetry?.detected_faces?.map((f) => ({
                 bbox: f.bbox,
